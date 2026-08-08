@@ -4,7 +4,7 @@ Local-first automated trading terminal: a Tauri desktop shell wrapping a React +
 
 The workflow is concept-in, trades-out: ingest trading concepts → synthesize executable entry strategies strictly grounded in them → QA, backtest and refine against extracted historical data → scan a watchlist for live setups → AI-validate every signal → block unsafe trades with live risk interception → copy accepted trades from a master account to slave accounts across MT5 / Binance / MEXC.
 
-> Built per `Instructions.md` and `PRD.md` (v0.2). Feature roadmap and phase status live in `Pending.md`.
+> Feature roadmap and phase status live in `Pending.md`.
 
 ## Highlights
 
