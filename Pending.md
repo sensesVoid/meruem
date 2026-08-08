@@ -169,4 +169,38 @@ NewsAgent emits a high-impact → `trade_block` signal per asset; surface it int
  - **Tests** — `tests/test_broker_connector.py` (9: registry contents, namespace mapping, factory types, protocol methods, no-credential safe defaults, balance/order normalization, OHLCV rows, copier unsupported-broker guard, copier normalized OrderResult path). Suite **235 passing**; ruff clean; `tsc` + `vite build` clean.
  - **Remaining for #14**: cTrader / other brokers as registry entries (cTrader needs its REST/WebSocket client); per-broker symbol-map normalization for MEXC (e.g. `XAUUSD` → `XAUUSD/USDT`); live-smoke with real MEXC keys.
 
-**Phase 11 — Shipping: Commit to GitHub + #15 Rust desktop (very large).** [ ] Commit repo to GitHub, then compile the Tauri/Rust shell with headless MT5 terminals per slave account (10+ slaves) and revisit optimality.
+**Phase 11 — Shipping → Rust desktop (#15, very large).** [~] GitHub part DONE Aug 2026; the Rust desktop transition is broken into sub-phases 11.1 → 11.7 below.
+
+**11.0 (DONE Aug 2026) — GitHub shipping.** Repo initialized (`git init -b main`), full project committed (`0890c9e`), README rewritten and grounded in the current feature set (`ade691d`), internal planning docs (IR.md / Instructions.md / PRD.md) untracked + gitignored (`ffea7e1`, `643cd81`), pushed to `github.com/sensesVoid/meruem` (`origin/main`).
+
+**11.1 — Baseline desktop bootstrap (small-med).** [ ] Turn the existing Tauri stub into a runnable end-to-end desktop app:
+- `frontend/src/lib/api.ts` uses `BASE = "/api"` — that only works in dev via the Vite proxy. In a production build the backend URL must resolve at runtime: detect Tauri (`window.__TAURI_INTERNALS__` / injected global) → `http://127.0.0.1:8765/api`, else keep `/api` (dev).
+- Replace the placeholder `backend_health` ping in `src-tauri/src/lib.rs` with a real `/api/health` probe and spawn the backend via `tauri-plugin-shell` `Command` (from the `.venv` python in dev; the sidecar binary in 11.2). The `frontend/src/lib/sidecar.ts` referenced by `lib.rs` does not exist — either create it or move sidecar management fully into Rust.
+- Acceptance: fresh clone → `setup.ps1` → `npm run tauri dev` (then `tauri build`) launches the 1440×900 window (icons already present) with the full 9-tab UI and a green TopNav status.
+
+**11.2 — Backend bundling as sidecar binary (large).** [ ] A one-click desktop must not require a dev venv:
+- Evaluate PyInstaller freeze of `app.main:app` (incl. `MetaTrader5`, `ccxt`, `xgboost`, optional chromadb) → `meruem-backend.exe`; confirm `MetaTrader5` works frozen (hidden imports / data files); documented fallback = portable embedded Python + site-packages inside the install dir.
+- Register the binary as a Tauri `bundle.externalBin` sidecar; Rust spawns it with `Command::new_sidecar` on `--host 127.0.0.1 --port 8765` (no `--reload` in prod).
+- Add `tauri-plugin-updater` + NSIS/MSI bundle targets; code-signing decision (defer / self-signed) documented in the release notes.
+
+**11.3 — Runtime engine lifecycle in Rust (medium).** [ ]
+- Spawn → health-poll (TopNav already renders BACKEND OFFLINE; add an explicit "engine starting" state) → bounded auto-restart on crash → graceful kill on window close → single-instance guard (lock file / port pre-check so a second launch attaches or exits instead of double-binding 8765).
+- Backend shutdown hygiene: stop the APScheduler, release MT5 terminals cleanly (feeds 11.5).
+
+**11.4 — Headless MT5 per slave — design spike & optimality revisit (medium, decision gate).** [ ] Revisit #15's premise with data before building:
+- **Option A (candidate):** N portable `terminal64.exe` instances — one data folder per account (`/portable`), auto-login via config (`common.ini`: server/login/password), window hidden (startup mode `HIDE`/minimize); Python `MetaTrader5` connects per instance via `mt5.initialize(path=...)`. No broker-side requirements. Cost ≈ 150–250 MB RAM per instance.
+- **Option B:** MT5 Manager API / gateway — requires broker-side manager credentials → REJECTED for retail users.
+- **Option C:** REST-only execution via the universal broker connector (ccxt: MEXC/crypto; broker REST where offered) — lighter, but MT5 stays for FX/metals.
+- **Option D:** third-party copy-trade platforms — out of scope.
+- Gate: spike — launch 10 hidden portable instances, measure RAM/CPU, verify N concurrent `mt5.initialize()` and order routing; decide A vs A+C hybrid before starting 11.5.
+
+**11.5 — Headless terminal manager (very large).** [ ] The core of #15:
+- Rust `TerminalManager`: account ↔ instance registry (persisted), per-account portable folder + config generation, hidden spawn, watchdog (bounded restart on crash), orphan cleanup on exit, sequenced startup (backend → master instance → slave instances).
+- Backend `mt5_adapter.py` → multi-instance: `initialize(path=...)` per account; `_test_broker` / `_account_status` / `copier._place` route through the account's instance; `/brokers/status` reports per-instance alive + login state (mirrors the Phase 10 universal connector contract).
+- Failure isolation: one dead instance never blocks the rest (same guard pattern as `scan_all_assets`' per-symbol error handling).
+
+**11.6 — Reliability & resources (medium).** [ ] Lazy vs all-at-launch spawn (decided by the 11.4 spike), RAM/CPU budgets, per-instance logs, connection-drop re-login, DB/parquet paths anchored inside the install dir, single source of truth for the "engine healthy" state surfaced in TopNav.
+
+**11.7 — Release & docs (small-med).** [ ] `tauri build --release` artifact + NSIS installer; offline install test on a clean machine; README section (install/uninstall, antivirus exclusions for MT5 portable folders, firewall note, upgrade flow); version-bump cadence + updater feed.
+
+[note] #15 constraint honored: with 10+ slaves we never open N visible MT5 windows. The plan's Option A (hidden portable instances) is the fallback, gated on the 11.4 spike, with Option C (REST-only execution where a broker exposes one) as the lighter alternative — the universal broker connector from Phase 10 makes C pluggable.
