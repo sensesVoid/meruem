@@ -15,3 +15,8 @@ src-tauri/target/
 
 # Env
 .env
+
+# Internal planning docs (kept local, not published)
+IR.md
+Instructions.md
+PRD.md
