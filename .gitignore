@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+backend/meruem.db
+chroma_data/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# Tauri
+src-tauri/target/
+
+# Env
+.env
