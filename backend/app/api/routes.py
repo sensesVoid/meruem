@@ -179,6 +179,70 @@ def provider_models(provider_id: str):
     }
 
 
+@router.post("/providers/{provider_id}/test")
+def provider_test(provider_id: str):
+    """Verify a configured LLM provider live: stored key + endpoint + model.
+
+    Performs a real, minimal OpenAI-compatible chat completion using the exact
+    stored API key and the provider's configured model, so the Vault UI can show
+    a green/red "key works" indicator instead of only "key set".
+    """
+    import time
+
+    from app.services.model_config import get_providers
+    from app.services.vault import VaultService
+
+    provider = next((p for p in get_providers() if p.get("id") == provider_id), None)
+    if provider is None:
+        raise HTTPException(404, "unknown provider")
+
+    ref = provider.get("key_ref", "")
+    if ":" in ref:
+        ns, user = ref.split(":", 1)
+    else:
+        ns, user = "llm", ref
+    key = VaultService.get(ns, user)
+    if not key:
+        return {
+            "ok": False, "provider": provider_id,
+            "model": provider.get("model", ""),
+            "error": "no API key stored — paste a key and save it first",
+        }
+
+    # Model priority: the agent-assigned model if one of them hosts this
+    # provider's model, else the provider's configured model.
+    from openai import OpenAI
+    try:
+        client = OpenAI(base_url=provider["base_url"], api_key=key)
+        model = provider.get("model", "")
+        start = time.time()
+        chat = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a connectivity probe. Reply with the single word OK."},
+                {"role": "user", "content": "ping"},
+            ],
+            max_tokens=5,
+            temperature=0,
+        )
+        latency_ms = int((time.time() - start) * 1000)
+        text = (chat.choices[0].message.content or "").strip()
+        return {
+            "ok": True,
+            "provider": provider_id,
+            "model": model,
+            "latency_ms": latency_ms,
+            "reply": text[:60],
+        }
+    except Exception as exc:  # noqa: BLE001 - surface the real provider error
+        return {
+            "ok": False,
+            "provider": provider_id,
+            "model": provider.get("model", ""),
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 # ---------- Ollama connector ----------
 
 @router.get("/ollama/models")

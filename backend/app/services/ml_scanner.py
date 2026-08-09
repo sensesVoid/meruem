@@ -234,7 +234,8 @@ def _label_from_spec(spec: dict) -> int | None:
 
 # ---- dataset builder ----
 
-def _fetch_training_rows(symbol: str, timeframe: str, bars: int = 500) -> list[dict]:
+def _fetch_training_rows(symbol: str, timeframe: str, bars: int = 500,
+                         asset_class: str = "") -> list[dict]:
     """OHLCV rows for ML training features, in priority order:
 
     1. The extracted Parquet dataset for ``(symbol, timeframe)`` (most recent
@@ -257,7 +258,8 @@ def _fetch_training_rows(symbol: str, timeframe: str, bars: int = 500) -> list[d
     async def _live():
         md = MarketDataService()
         try:
-            data = await md.fetch(symbol=symbol, timeframe=timeframe, limit=bars)
+            data = await md.fetch(symbol=symbol, timeframe=timeframe,
+                                  limit=bars, asset_class=asset_class)
             return data.get("candles") or []
         except Exception:  # noqa: BLE001
             return []
@@ -284,13 +286,13 @@ def _build_dataset(session) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[st
     from app.models.entities import Strategy as StrategyModel
 
     # Only train on strategies that passed the full QA gate (green).
-    active_ids = [
-        s.id for s in session.exec(
-            select(StrategyModel).where(StrategyModel.status == "active")
-        ).all()
-    ]
-    if not active_ids:
+    active = session.exec(
+        select(StrategyModel).where(StrategyModel.status == "active")
+    ).all()
+    if not active:
         return None
+    active_ids = [s.id for s in active]
+    asset_class_by_strategy = {s.id: s.asset_class for s in active}
 
     runs = session.exec(
         select(BacktestRun).where(
@@ -321,8 +323,12 @@ def _build_dataset(session) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[st
         age_days = (now_ts - run.created_at.timestamp()) / 86400.0
         weight = 2 ** (-age_days / DECAY_HALF_LIFE_DAYS)
 
-        # Pull OHLCV for feature extraction (extracted dataset preferred)
-        rows = _fetch_training_rows(run.symbol, run.timeframe, bars=500)
+        # Pull OHLCV for feature extraction (extracted dataset preferred).
+        # Passing the strategy's asset_class keeps provider routing correct
+        # (MT5 vs Binance vs Yahoo) when no extracted dataset exists yet.
+        rows = _fetch_training_rows(
+            run.symbol, run.timeframe, bars=500,
+            asset_class=asset_class_by_strategy.get(run.strategy_id, ""))
         if len(rows) < 60:
             continue
 

@@ -15,7 +15,41 @@ import {
   TrendingDown,
   Layers,
   Settings2,
+  ChevronDown,
 } from "lucide-react";
+
+function CollapsibleCard({
+  title,
+  icon,
+  defaultOpen = true,
+  children,
+}: {
+  title: React.ReactNode;
+  icon: React.ReactNode;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-lg border border-meruem-border bg-meruem-panel p-4">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 text-left"
+      >
+        <h3 className="text-sm font-semibold flex items-center gap-2">
+          {icon}
+          {title}
+        </h3>
+        <ChevronDown
+          className={`h-4 w-4 text-meruem-muted shrink-0 transition-transform ${open ? "" : "-rotate-90"}`}
+        />
+      </button>
+      {open && <div className="mt-3">{children}</div>}
+    </div>
+  );
+}
 
 export function RiskPanel() {
   const [plan, setPlan] = useState<RiskPlan | null>(null);
@@ -361,11 +395,10 @@ export function RiskPanel() {
         {/* Right Column (1 col): Clearance Calculator & Quick Settings */}
         <div className="flex flex-col gap-4">
           {/* Trade Clearance Calculator */}
-          <div className="rounded-lg border border-meruem-border bg-meruem-panel p-4">
-            <h3 className="text-sm font-semibold mb-2 flex items-center gap-2">
-              <Zap className="h-4 w-4 text-emerald-400" />
-              Pre-Trade Clearance Check
-            </h3>
+          <CollapsibleCard
+            title="Pre-Trade Clearance Check"
+            icon={<Zap className="h-4 w-4 text-emerald-400" />}
+          >
             <p className="text-xs text-meruem-muted mb-3">
               Test if a trade passes all risk guardrails and get lot sizes before placing it.
             </p>
@@ -463,15 +496,13 @@ export function RiskPanel() {
                 )}
               </div>
             )}
-          </div>
+          </CollapsibleCard>
 
           {/* Quick Settings Form */}
-          <div className="rounded-lg border border-meruem-border bg-meruem-panel p-4">
-            <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-              <Sliders className="h-4 w-4 text-indigo-400" />
-              Risk Guardrail Settings
-            </h3>
-
+          <CollapsibleCard
+            title="Risk Guardrail Settings"
+            icon={<Sliders className="h-4 w-4 text-indigo-400" />}
+          >
             <div className="flex flex-col gap-3 text-xs">
               <div>
                 <label className="block text-[11px] text-meruem-muted mb-1">
@@ -548,14 +579,13 @@ export function RiskPanel() {
                 {savingSettings ? "Saving..." : "Save Guardrail Settings"}
               </button>
             </div>
-          </div>
+          </CollapsibleCard>
 
           {/* Trading & Position Settings (merged from the Settings tab) */}
-          <div className="rounded-lg border border-meruem-border bg-meruem-panel p-4">
-            <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-              <Settings2 className="h-4 w-4 text-emerald-400" />
-              Trading &amp; Position Settings
-            </h3>
+          <CollapsibleCard
+            title="Trading &amp; Position Settings"
+            icon={<Settings2 className="h-4 w-4 text-emerald-400" />}
+          >
             <div className="flex flex-col gap-3 text-xs">
               <div>
                 <label className="block text-[11px] text-meruem-muted mb-1">
@@ -679,7 +709,7 @@ export function RiskPanel() {
               Changes persist immediately. Credentials, API keys and model selection live in the
               <span className="text-meruem-accent"> Vault</span> tab.
             </p>
-          </div>
+          </CollapsibleCard>
         </div>
       </div>
     </div>

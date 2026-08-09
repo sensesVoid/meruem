@@ -253,43 +253,82 @@ def _rule_blocks(markdown: str) -> list[str]:
     return rules
 
 
-def _build_references_block(references: list[dict] | None,
-                            budget: int = 8000) -> str:
-    """Join saved reference concepts WITHOUT ever slicing inside a concept.
+def _reference_has_content(references: list[dict] | None) -> bool:
+    """True if any saved reference actually carries a concept to synthesize from."""
+    return any((r.get("concept_markdown") or "").strip() for r in (references or []))
 
-    Each reference is kept whole; references that no longer fit the character
-    budget are dropped WHOLE (never truncated mid-concept), so a growing library
-    never corrupts the tail of the grounding block.
-    """
+
+def _references_as_concept(references: list[dict] | None) -> str:
+    """Collapse the saved reference library into a trader-context block so the
+    synthesis can be driven by references alone (no typed concept required)."""
     blocks: list[str] = []
-    used = 0
-    for r in references or []:
+    for r in (references or []):
         text = (r.get("concept_markdown") or "").strip()
         if not text:
             continue
-        block = f"- {(r.get('name') or 'Strategy').strip()}:\n  {text}"
-        cost = len(block) + 4  # separator
-        if used + cost > budget and blocks:
-            break
-        blocks.append(block)
-        used += cost
-    return "\n---\n".join(blocks) or "(no saved references)"
+        blocks.append(f"### {r.get('name') or 'Reference Strategy'}\n{text}")
+    return "\n\n".join(blocks)
+
+
+def _build_references_block(references: list[dict] | None,
+                            budget: int = 8000) -> str:
+    """Join saved reference concepts so EVERY saved reference is present.
+
+    The total budget is split fairly across the references (each capped to its
+    share), so a growing library never silently drops an older strategy out of
+    the synthesis prompt — previously references beyond the budget were dropped
+    WHOLE, which collapsed a large library down to a single (most recent) entry.
+
+    Oversized references are condensed into their structured template sections
+    (thesis / terms / toolset / model / invalidation / target) rather than raw
+    head characters, so the essential idea of every reference survives.
+    """
+    entries = [
+        ((r.get("name") or "Strategy").strip(),
+         (r.get("concept_markdown") or "").strip())
+        for r in references or []
+    ]
+    entries = [e for e in entries if e[1]]
+    if not entries:
+        return "(no saved references)"
+    per_ref = max(600, budget // len(entries))
+    blocks: list[str] = []
+    for name, text in entries:
+        if len(text) <= per_ref:
+            blocks.append(f"- {name}:\n  {text}")
+            continue
+        sections = _template_sections(text)
+        if sections:
+            head = f"- {name} (condensed):"
+            parts = []
+            for key in _TEMPLATE_ORDER:
+                section_text = (sections.get(key) or "").strip()
+                if section_text:
+                    parts.append(f"  {_TEMPLATE_LABELS[key]}: {section_text}")
+            condensed = "\n".join(parts)
+            if len(condensed) > per_ref:
+                condensed = condensed[:per_ref].rstrip() + "\n  …(truncated)"
+            blocks.append(f"{head}\n{condensed}")
+        else:
+            blocks.append(
+                f"- {name}:\n  {text[:per_ref].rstrip()}\n  …(truncated)")
+    return "\n---\n".join(blocks)
 
 
 def _build_rag_block(rag_docs: list[str], budget: int = 6000) -> str:
-    """Join retrieved RAG docs whole (drop overflow docs, never truncate one)."""
-    blocks: list[str] = []
-    used = 0
-    for d in rag_docs or []:
-        text = (d or "").strip()
-        if not text:
-            continue
-        cost = len(text) + 4
-        if used + cost > budget and blocks:
-            break
-        blocks.append(text)
-        used += cost
-    return "\n---\n".join(blocks) or "(no grounded concepts retrieved)"
+    """Join retrieved RAG docs so EVERY retrieved doc is present.
+
+    Each doc is capped to a fair share of the total budget instead of dropping
+    whole overflow docs, so a dense retrieval is never truncated down to its
+    first hit.
+    """
+    docs = [d.strip() for d in rag_docs or [] if d and d.strip()]
+    if not docs:
+        return "(no grounded concepts retrieved)"
+    per_doc = max(500, budget // len(docs))
+    return "\n---\n".join(
+        d if len(d) <= per_doc else d[:per_doc] + "\n…(truncated)"
+        for d in docs)
 
 
 _HEURISTIC_TEMPLATE = """\
@@ -708,24 +747,31 @@ class SynthesizerAgent:
         route it back into the refine loop instead of backtesting uncallable code.
         """
         if not concept or not concept.strip():
-            return {
-                "entry_markdown": "",
-                "approximations": [],
-                "grounded_on": [],
-                "summary": "No trading concept provided — nothing to synthesize.",
-                "provider": "heuristic",
-                "grounded": False,
-                "grounding": {
-                    "score": 0.0,
-                    "verdict": "UNGROUNDED",
-                    "ungrounded_rules": [],
-                    "source_count": 0,
-                    "reason": "No trading concept provided.",
-                },
-                "new_primitives": [],
-                "new_primitive_errors": [],
-                "ir": self._ir_offline(),
-            }
+            # No trader-typed concept: with a saved reference library (or RAG)
+            # the synthesis is still driven by those references — only bail out
+            # when there is truly nothing to derive an entry from.
+            if not _reference_has_content(references):
+                return {
+                    "entry_markdown": "",
+                    "approximations": [],
+                    "grounded_on": [],
+                    "summary": "No trading concept provided — nothing to synthesize.",
+                    "provider": "heuristic",
+                    "grounded": False,
+                    "grounding": {
+                        "score": 0.0,
+                        "verdict": "UNGROUNDED",
+                        "ungrounded_rules": [],
+                        "source_count": 0,
+                        "reason": "No trading concept provided.",
+                    },
+                    "new_primitives": [],
+                    "new_primitive_errors": [],
+                    "ir": self._ir_offline(),
+                }
+            # Reuse the saved references as the authoritative source when no concept
+            # was typed, so grounding and the RAG query still have real content.
+            concept = _references_as_concept(references)
         rag_docs = self._retrieve(concept, asset_class=asset_class)
         rag_block = _build_rag_block(rag_docs)
         references_block = _build_references_block(references)
@@ -734,8 +780,8 @@ class SynthesizerAgent:
                 name=(name or "Strategy")[:120], symbol=symbol,
                 timeframe=timeframe, asset_class=asset_class or "unknown",
                 concept=concept[:6000], notes=(notes or "")[:2000],
-                rag=rag_block[:6000],
-                references=references_block[:8000],
+                rag=rag_block,
+                references=references_block,
                 template=_build_template_block(_template_sections(concept)),
                 lessons=self._ltr_lessons()[:4000],
                 ir_schema=self._ir_schema(),

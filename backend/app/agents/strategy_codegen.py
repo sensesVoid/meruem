@@ -52,12 +52,21 @@ execution knobs the rules imply (e.g. ATR multipliers, swing window N).
    - Entry must follow ONLY the trader's ENTRY CRITERIA. You may implement a rule
      creatively (exact window, threshold) but do NOT add entry logic the trader
      did not state.
-   - Call self.buy(size=..., sl=..., tp=...) or self.sell(...) with concrete
-     values. Respect max 1 position open at a time (`if self.position: return`).
+- Call self.buy(size=..., sl=..., tp=...) or self.sell(...) with concrete
+      values. Respect max 1 position open at a time (`if self.position: return`).
    - Guard every indicator/level for NaN/inf before using it (skip the bar if
-     any needed value is not finite).
-   - Size so that if SL is hit you lose ~ risk_pct of equity:
-       size = risk_pct * self.equity / (entry - sl)   [clamp: size <= equity/entry]
+      any needed value is not finite).
+   - AVOID conditions that rarely or never co-occur on the SAME bar: a fresh
+     breakout (close beyond an N-bar extreme) and a same-bar sweep of the OPPOSITE
+     N-bar extreme (low below the prior low WHILE close breaks the prior high)
+     cannot both fire — that bar does not exist. Sequence multi-part setups across
+     bars (e.g. sweep on bar t, confirmation/retest on t+1) or relax one condition,
+     so the strategy actually generates trades.
+- Size so that if SL is hit you lose ~ risk_pct of equity:
+        raw = risk_pct * self.equity / (entry - sl)
+        size = raw if 0 < raw < 1 else max(1, int(round(raw)))
+     backtesting REQUIRES size to be a fraction of equity (0<size<1) OR a whole
+     number of units — never pass a fractional number >= 1 (e.g. 312.5 is invalid).
    - Validate SL/TP geometry: for buy, sl < entry < tp; for sell, tp < entry < sl.
      If inverted on a bar, do not trade that bar.
 6. Do NOT reference files, network, raw volumes-as-time, or anything outside the

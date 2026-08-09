@@ -33,6 +33,16 @@ def test_generate_raises_when_all_providers_fail(monkeypatch):
     monkeypatch.setattr("app.agents.universal_llm.get_providers", fake_providers)
     monkeypatch.setattr(
         "app.agents.universal_llm.UniversalLLM._provider_key", lambda self, p: "dummy-key")
+    monkeypatch.setattr(
+        "app.agents.universal_llm.UniversalLLM._ollama_installed",
+        lambda self: [])
+    # Simulate the local Ollama fallback being unavailable too (raises), so the
+    # only remaining outcome is a total failure.
+    def _raise_generate(self, prompt, model=None, temperature=0.2):
+        raise ConnectionError("ollama down")
+
+    monkeypatch.setattr(
+        "app.agents.ollama_client.OllamaClient.generate", _raise_generate)
     with pytest.raises(AllProvidersFailed):
         UniversalLLM().generate("hello", temperature=0.0)
 

@@ -17,7 +17,7 @@ from typing import Any
 import pandas as pd
 
 from app.core.config import BACKEND_DIR
-from app.services.market_data import MarketDataService
+from app.services.market_data import MarketDataService, _binance_only
 from app.services.mt5_adapter import MT5Adapter
 
 DATASETS_DIR = BACKEND_DIR / "data" / "historical"
@@ -39,8 +39,8 @@ def read_dataset_candles(
     ``None`` when no dataset exists for ``(symbol, timeframe)`` or it cannot
     be read — callers fall back to the live providers.
     """
-    path = DATASETS_DIR / f"{str(symbol).strip().upper()}_{str(timeframe).strip()}.parquet"
-    if not path.exists():
+    path = _dataset_path(symbol, timeframe)
+    if path is None:
         return None
     try:
         df = pd.read_parquet(path)
@@ -80,6 +80,32 @@ _TIMEFRAME_SECONDS = {
     "H1": 3600, "1h": 3600, "H4": 14400, "4h": 14400, "D1": 86400,
     "1D": 86400, "W1": 604800, "1W": 604800, "MN1": 2592000, "1M": 2592000,
 }
+
+
+def _dataset_path(symbol: str, timeframe: str) -> pathlib.Path | None:
+    """Resolve the Parquet file for ``(symbol, timeframe)``.
+
+    Accepts both MT5-style (``M5``/``H1``/``MN1``) and plain (``5m``/``1h``/``1M``)
+    timeframe spellings, so a dataset extracted as ``EURUSD_M5.parquet`` is found
+    when the backtest asks for ``EURUSD 5m``.
+    """
+    sym = str(symbol).strip().upper()
+    direct = DATASETS_DIR / f"{sym}_{str(timeframe).strip()}.parquet"
+    if direct.exists():
+        return direct
+    try:
+        target_seconds = _TIMEFRAME_SECONDS[str(timeframe).strip()]
+    except (KeyError, AttributeError):
+        return None
+    prefix = f"{sym}_"
+    for candidate in DATASETS_DIR.glob("*.parquet"):
+        name = candidate.name
+        if not name.startswith(prefix):
+            continue
+        tf_token = name[len(prefix):-len(".parquet")]
+        if _TIMEFRAME_SECONDS.get(tf_token) == target_seconds:
+            return candidate
+    return None
 
 
 class DatasetService:
@@ -147,10 +173,17 @@ class DatasetService:
                 "range or use a higher timeframe.")
 
         # 1. Fetch OHLCV rows for the exact window (MT5 range or fallback)
-        rows = self._fetch_ohlcv(symbol_clean, tf_clean, start, end, asset_class)
+        rows, provider, fetch_diag = self._fetch_ohlcv(
+            symbol_clean, tf_clean, start, end, asset_class)
         if not rows:
+            detail = "; ".join(
+                f"{d.get('provider', 'unknown')}: {d.get('error', 'no data')}"
+                for d in fetch_diag
+            )
             raise ValueError(
-                f"No market data could be fetched for {symbol_clean} ({tf_clean})")
+                f"No market data could be fetched for {symbol_clean} ({tf_clean}) — "
+                f"tried MT5 / Binance / Yahoo. {detail}")
+        warnings = [d for d in fetch_diag if not d.get("ok")]
 
         # 2. Keep only bars inside the window, chronological, de-duplicated.
         start_ts, end_ts = int(start.timestamp()), int(end.timestamp())
@@ -232,6 +265,8 @@ class DatasetService:
             "file_size_bytes": file_size_bytes,
             "file_size_mb": round(file_size_bytes / (1024 * 1024), 2),
             "file_path": str(file_path),
+            "provider": provider or "unknown",
+            "warnings": warnings,
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
@@ -344,32 +379,58 @@ class DatasetService:
     def _fetch_ohlcv(
         self, symbol: str, timeframe: str,
         start: datetime, end: datetime, asset_class: str,
-    ) -> list[dict]:
+    ) -> tuple[list[dict], str | None, list[dict]]:
         """Attempt fetching OHLCV for the exact window from MT5 first, falling
-        back to MarketDataService (paged Binance / Yahoo period range)."""
-        adapter = MT5Adapter()
-        # Attempt MT5 range pull first for forex/commodities/metals. The pull
-        # window is padded by 1 day on the start side because MT5 interprets
-        # naive datetimes as its own server-local time on some builds (a 2-3h
-        # offset could otherwise under-fetch the boundary); the exact window
-        # filter below trims the padding.
-        if asset_class not in ("crypto", "cripto"):
+        back to MarketDataService (paged Binance / Yahoo period range).
+
+        Returns ``(rows, provider, diagnostics)`` where ``provider`` is the
+        source that actually served the data (or ``None``), and
+        ``diagnostics`` records every provider that was tried and how it went
+        — so extraction can surface a readable, actionable error instead of a
+        silent empty result.
+        """
+        diagnostics: list[dict] = []
+
+        if (asset_class not in ("crypto", "cripto", "cryptocurrency", "digital")
+                and not _binance_only(symbol)):
+            # Attempt MT5 range pull first for forex/commodities/metals/plain-
+            # USD crypto CFDs (BTCUSD). Binance-only quotes (BTCUSDT/ETHUSDC)
+            # skip MT5 entirely — the terminal never serves them. The pull
+            # window is padded by 1 day on the start side because MT5 interprets
+            # naive datetimes as its own server-local time on some builds (a
+            # 2-3h offset could otherwise under-fetch the boundary); the exact
+            # window filter below trims the padding.
+            adapter = MT5Adapter()
             try:
                 rates = adapter.pull_ohlcv_range(
                     symbol, timeframe, start - timedelta(days=1), end)
                 if rates:
-                    return rates
-            except Exception:  # noqa: BLE001, S110 - MT5 is optional; fall back
-                pass
+                    return rates, "mt5", diagnostics
+                diagnostics.append({
+                    "provider": "mt5",
+                    "ok": False,
+                    "error": (
+                        "MetaTrader5 returned no candles — terminal not "
+                        "running/uninitialised, symbol missing from Market "
+                        "Watch, or no market data covers the requested range."),
+                })
+            except Exception as exc:  # noqa: BLE001 - MT5 is optional; fall back
+                diagnostics.append({
+                    "provider": "mt5",
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
 
-        # Fallback to MarketDataService (Binance for crypto / Yahoo for stocks/FX)
+        # Fallback to MarketDataService (Binance for crypto / Yahoo for
+        # stocks & FX), collecting its errors instead of swallowing them.
         import asyncio
 
         async def _fetch():
             md = MarketDataService()
             try:
-                candles, _provider = await md.fetch_range(
-                    symbol, timeframe, int(start.timestamp()), int(end.timestamp()))
+                candles, prov = await md.fetch_range(
+                    symbol, timeframe, int(start.timestamp()), int(end.timestamp()),
+                    asset_class=asset_class)
                 # Map keys to standard dict
                 return [
                     {
@@ -381,11 +442,28 @@ class DatasetService:
                         "volume": c.get("volume", 0.0),
                     }
                     for c in candles
-                ]
-            finally:
-                await md.close()
+                ], prov
+            except Exception as exc:  # noqa: BLE001
+                return [], f"{type(exc).__name__}: {exc}"
 
         try:
-            return asyncio.run(_fetch())
-        except Exception:  # noqa: BLE001
-            return []
+            candles, prov = asyncio.run(_fetch())
+        except Exception as exc:  # noqa: BLE001
+            candles, prov = [], f"{type(exc).__name__}: {exc}"
+        if candles:
+            return candles, prov, diagnostics
+
+        fallback_error = prov if isinstance(prov, str) and ":" in prov else (
+            f"No candles returned by {prov or 'Binance/Yahoo'} for the range.")
+        from app.services.market_data import YAHOO_INTERVAL
+        if isinstance(prov, str) and (prov.startswith("yahoo") or prov == "Binance/Yahoo"):
+            if YAHOO_INTERVAL.get(timeframe) is None:
+                fallback_error += (
+                    " Yahoo Finance does not serve this intraday interval "
+                    "(e.g. 4h) — MT5 or Binance must provide it.")
+        diagnostics.append({
+            "provider": prov or "provider-chain",
+            "ok": False,
+            "error": fallback_error,
+        })
+        return [], None, diagnostics

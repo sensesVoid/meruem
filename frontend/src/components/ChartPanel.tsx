@@ -99,6 +99,7 @@ function LiveChart({ symbol, barSeconds, bars, timeframe, onTick, onProvider, on
   const lineOverlayRef = useRef<Map<IPriceLine, ChartPositionOverlay>>(new Map());
   const tooltipRef = useRef<HTMLDivElement | null>(null);
   const hoverLineRef = useRef<IPriceLine | null>(null);
+  const prevKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -336,13 +337,69 @@ function LiveChart({ symbol, barSeconds, bars, timeframe, onTick, onProvider, on
     };
 
     const applyData = () => {
-      if (!seriesRef.current || !chartRef.current || candles.length === 0) return;
-      lastPriceRef.current = candles[candles.length - 1].close;
-      seriesRef.current.setData(candles);
-      chartRef.current.timeScale().setVisibleLogicalRange({
-        from: Math.max(0, candles.length - VISIBLE_BARS),
-        to: candles.length + 4,
+      const series = seriesRef.current;
+      const chart = chartRef.current;
+      if (!series || !chart || candles.length === 0) return;
+      const seen = new Set<number>();
+      candles = candles.filter((c) => {
+        const t = c.time as number;
+        if (seen.has(t)) return false;
+        seen.add(t);
+        return true;
       });
+      if (candles.length === 0) return;
+
+      const symbolSwitch =
+        prevKeyRef.current === null || prevKeyRef.current.split("|")[0] !== symbol;
+      const prevVisible = symbolSwitch ? null : chart.timeScale().getVisibleRange();
+
+      lastPriceRef.current = candles[candles.length - 1].close;
+      try {
+        series.setData(candles);
+      } catch {
+        series.setData([]);
+        series.setData(candles);
+      }
+
+      if (symbolSwitch) {
+        // New instrument: force the price axis to refit this symbol's magnitude
+        // and land on the latest N bars.
+        chart.priceScale("right").applyOptions({ autoScale: true });
+        chart.timeScale().setVisibleLogicalRange({
+          from: Math.max(0, candles.length - VISIBLE_BARS),
+          to: candles.length + 4,
+        });
+      } else if (
+        prevVisible &&
+        typeof prevVisible.from === "number" &&
+        typeof prevVisible.to === "number"
+      ) {
+        // Same instrument, different timeframe: keep the previously visible
+        // time window instead of snapping to a brand-new bar range, so the
+        // switch renders seamlessly without a jarring refit.
+        const first = candles[0].time as number;
+        const last = candles[candles.length - 1].time as number;
+        const from = Math.max(prevVisible.from, first);
+        const to = Math.min(prevVisible.to, last);
+        if (from <= to) {
+          chart.timeScale().setVisibleRange({
+            from: from as UTCTimestamp,
+            to: to as UTCTimestamp,
+          });
+        } else {
+          chart.timeScale().setVisibleRange({
+            from: last as UTCTimestamp,
+            to: last as UTCTimestamp,
+          });
+        }
+      } else {
+        chart.timeScale().setVisibleLogicalRange({
+          from: Math.max(0, candles.length - VISIBLE_BARS),
+          to: candles.length + 4,
+        });
+      }
+
+      prevKeyRef.current = `${symbol}|${barSeconds}`;
       onTick?.(lastPriceRef.current);
       startTick();
     };

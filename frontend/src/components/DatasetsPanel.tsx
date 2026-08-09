@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, Asset, datasetCoverage, DatasetExtractResponse, DatasetItem, DatasetPreview } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Download, Database, Trash2, Eye, RefreshCw, BarChart2, CalendarRange } from "lucide-react";
+import { Download, Database, Trash2, Eye, RefreshCw, BarChart2, CalendarRange, AlertTriangle } from "lucide-react";
 
 function defaultRange(): { start: string; end: string } {
   const end = new Date();
@@ -12,6 +12,37 @@ function defaultRange(): { start: string; end: string } {
     start: start.toISOString().slice(0, 10),
     end: end.toISOString().slice(0, 10),
   };
+}
+
+// Mirrors the backend safety cap (dataset_service.MAX_BARS) so we can reject an
+// obviously-unfetchable range in the UI instantly, before a server round-trip.
+const MAX_BARS = 500_000;
+const TIMEFRAME_SECONDS: Record<string, number> = {
+  M1: 60,
+  "1m": 60,
+  M5: 300,
+  "5m": 300,
+  "15m": 900,
+  "1h": 3600,
+  "4h": 14400,
+  "1D": 86400,
+  "1d": 86400,
+};
+
+function estimateBars(startDate: string, endDate: string, timeframe: string): number {
+  if (!startDate || !endDate) return 0;
+  const spanSec = Math.max(
+    0,
+    (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 1000,
+  );
+  const secs = TIMEFRAME_SECONDS[timeframe] ?? 900;
+  return Math.floor(spanSec / secs);
+}
+
+function formatBars(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return `${n}`;
 }
 
 export function DatasetsPanel() {
@@ -30,6 +61,11 @@ export function DatasetsPanel() {
 
   // Coverage of the watchlist for the selected timeframe (shared helper).
   const coverage = datasetCoverage(watchlist, datasets, timeframe);
+
+  // Live estimate of how many bars the selected range would fetch, so an
+  // unfetchable range is flagged in the UI immediately.
+  const estBars = estimateBars(startDate, endDate, timeframe);
+  const overCap = estBars > MAX_BARS;
 
   // Preview state
   const [preview, setPreview] = useState<DatasetPreview | null>(null);
@@ -67,6 +103,15 @@ export function DatasetsPanel() {
       setError("Start date must be before end date.");
       return;
     }
+    const est = estimateBars(startDate, endDate, timeframe);
+    if (est > MAX_BARS) {
+      setError(
+        `This range would fetch ~${formatBars(est)} ${timeframe} bars — over the ` +
+          `${MAX_BARS.toLocaleString()} bar limit. Shorten the date range or choose a ` +
+          `higher timeframe (e.g. 1h / 4h / 1D).`,
+      );
+      return;
+    }
     setExtracting(true);
     setError(null);
     setInfo(null);
@@ -78,12 +123,17 @@ export function DatasetsPanel() {
         end_date: endDate,
       });
       const errors = res.errors ?? [];
+      const warns = res.datasets.flatMap((d) =>
+        (d.warnings ?? []).map((w) => `${d.symbol}: ${w.error}`),
+      );
       if (res.datasets.length > 0) {
+        const src = res.datasets
+          .map((d) => `${d.symbol} (${d.provider || "unknown"})`)
+          .join(", ");
         setInfo(
-          `Extracted ${res.datasets.length} dataset(s) — ${res.datasets
-            .map((d) => d.symbol)
-            .join(", ")} — for ${startDate} → ${endDate}.` +
-            (errors.length > 0 ? ` ${errors.length} symbol(s) failed (see below).` : ""),
+          `Extracted ${res.datasets.length} dataset(s) — ${src} — for ${startDate} → ${endDate}.` +
+            (errors.length > 0 ? ` ${errors.length} symbol(s) failed (see below).` : "") +
+            (warns.length > 0 ? ` Warnings: ${warns.join(" | ")}` : ""),
         );
       } else if (errors.length > 0) {
         setError(
@@ -215,7 +265,8 @@ export function DatasetsPanel() {
             <select
               value={timeframe}
               onChange={(e) => setTimeframe(e.target.value)}
-              className="h-8 w-full rounded border border-meruem-border bg-meruem-panel px-2 text-xs text-meruem-text focus:outline-none"
+              disabled={extracting}
+              className="h-8 w-full rounded border border-meruem-border bg-meruem-panel px-2 text-xs text-meruem-text focus:outline-none disabled:opacity-50 disabled:pointer-events-none"
             >
               <option value="M1">M1 (1-min)</option>
               <option value="M5">M5 (5-min)</option>
@@ -231,7 +282,8 @@ export function DatasetsPanel() {
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              className="h-8 w-full rounded border border-meruem-border bg-meruem-panel px-2 text-xs text-meruem-text focus:outline-none"
+              disabled={extracting}
+              className="h-8 w-full rounded border border-meruem-border bg-meruem-panel px-2 text-xs text-meruem-text focus:outline-none disabled:opacity-50"
               required
             />
           </div>
@@ -241,7 +293,8 @@ export function DatasetsPanel() {
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              className="h-8 w-full rounded border border-meruem-border bg-meruem-panel px-2 text-xs text-meruem-text focus:outline-none"
+              disabled={extracting}
+              className="h-8 w-full rounded border border-meruem-border bg-meruem-panel px-2 text-xs text-meruem-text focus:outline-none disabled:opacity-50"
               required
             />
           </div>
@@ -252,6 +305,38 @@ export function DatasetsPanel() {
             </Button>
           </div>
         </div>
+
+        {/* Live bar estimate — rejects unfetchable ranges before we hit the server */}
+        <div
+          className={`flex items-center gap-1.5 rounded border px-1.5 py-1 text-[10px] ${
+            overCap
+              ? "border-rose-500/40 bg-rose-500/10 text-rose-300"
+              : "border-meruem-border/40 bg-meruem-bg/40 text-meruem-muted"
+          }`}
+        >
+          <BarChart2 className={`h-3 w-3 ${overCap ? "text-rose-400" : "text-meruem-accent"}`} />
+          <span>
+            Range would fetch{" "}
+            <span className="font-mono">{formatBars(estBars)}</span> {timeframe} bars
+            {overCap ? (
+              <> — over the {MAX_BARS.toLocaleString()} bar limit. Shorten the range or use a higher timeframe.</>
+            ) : (
+              <> (max {MAX_BARS.toLocaleString()}). Large ranges can take several minutes.</>
+            )}
+          </span>
+        </div>
+
+        {/* Processing lock — shown for the entire duration of the fetch */}
+        {extracting && (
+          <div className="flex items-center gap-2 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1.5 text-[11px] text-sky-300">
+            <RefreshCw className="h-3.5 w-3.5 animate-spin text-sky-400" />
+            <span>
+              <strong>Fetching historical data…</strong> pulling{" "}
+              <span className="font-mono">{formatBars(estBars)}</span> {timeframe} bars per symbol
+              from MT5 → Binance → Yahoo. The form is locked — hold on.
+            </span>
+          </div>
+        )}
       </form>
 
       {info && (
@@ -274,6 +359,7 @@ export function DatasetsPanel() {
               <th className="py-2 px-2.5">Dataset ID</th>
               <th className="py-2 px-2.5">Symbol</th>
               <th className="py-2 px-2.5">Timeframe</th>
+              <th className="py-2 px-2.5">Source</th>
               <th className="py-2 px-2.5 text-right">Bars</th>
               <th className="py-2 px-2.5">Date Range</th>
               <th className="py-2 px-2.5 text-right">Size</th>
@@ -290,6 +376,19 @@ export function DatasetsPanel() {
                   <td className="py-2 px-2.5 font-semibold">{d.symbol}</td>
                   <td className="py-2 px-2.5">
                     <Badge tone="blue">{d.timeframe}</Badge>
+                  </td>
+                  <td className="py-2 px-2.5">
+                    <Badge tone={d.provider === "mt5" ? "gold" : d.provider === "binance" ? "green" : d.provider === "yahoo" ? "blue" : "neutral"}>
+                      {d.provider || "—"}
+                    </Badge>
+                    {d.warnings && d.warnings.length > 0 && (
+                      <span
+                        className="ml-1 inline-flex items-center text-amber-300/80 cursor-help"
+                        title={d.warnings.map((w) => w.error).join("\n")}
+                      >
+                        <AlertTriangle className="h-3 w-3" />
+                      </span>
+                    )}
                   </td>
                   <td className="py-2 px-2.5 text-right font-mono font-medium">
                     {d.bar_count.toLocaleString()}
@@ -325,7 +424,7 @@ export function DatasetsPanel() {
               ))
             ) : (
               <tr>
-                <td colSpan={7} className="py-4 text-center text-xs text-meruem-muted">
+                <td colSpan={8} className="py-4 text-center text-xs text-meruem-muted">
                   No historical datasets stored yet. Extract one above!
                 </td>
               </tr>

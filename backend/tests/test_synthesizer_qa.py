@@ -125,3 +125,37 @@ def test_synthesize_combines_references(monkeypatch):
     assert d["provider"] == "test"
     assert "FVG retest" in d["entry_markdown"]
     assert d["grounded_on"] == ["ref 1", "ref 2"]
+
+
+def test_synthesize_references_block_keeps_every_reference(monkeypatch):
+    """A large reference library must NOT drop older strategies out of the prompt:
+    every saved reference (even condensed) reaches the synthesizer, so synthesis
+    combines the whole library instead of only the most recent entry."""
+
+    def fake_generate(self, prompt):
+        captured.append(prompt)
+        return (
+            ('{"entry_markdown": "1. Buy on the FVG retest.\\n2. Stop below the '
+             'sweep low.\\n3. Target the prior liquidity.", "approximations": [], '
+             '"grounded_on": [], "summary": "ok"}'),
+            "test",
+        )
+
+    from app.agents.validator import ValidatorChain
+    from app.agents.synthesizer import _build_references_block
+
+    monkeypatch.setattr(ValidatorChain, "generate", fake_generate)
+    captured: list[str] = []
+
+    # 12 references, each larger than the per-reference budget share.
+    refs = [
+        {"name": f"Strategie {i}", "concept_markdown": f"Rule {i}: " + ("long text. " * 200)}
+        for i in range(12)
+    ]
+    _build_references_block(refs, budget=8000)  # should not raise on the join
+    d = SynthesizerAgent().synthesize("Combo", "Sweep", references=refs)
+    prompt = captured[0]
+    # Every reference name must appear in the combined prompt.
+    for i in range(12):
+        assert f"Strategie {i}" in prompt, f"reference {i} was dropped from the prompt"
+    assert d["provider"] == "test"

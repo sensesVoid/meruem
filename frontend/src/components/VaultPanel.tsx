@@ -5,6 +5,7 @@ import {
   api,
   LLMProvider,
   OllamaModels,
+  ProviderTest,
   VaultStatus,
 } from "@/lib/api";
 import { Card } from "@/components/ui/card";
@@ -21,6 +22,9 @@ export function VaultPanel() {
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [msgs, setMsgs] = useState<Record<string, string>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [test, setTest] = useState<Record<string, { running: boolean; ok: boolean | null; error?: string }>>(
+    {},
+  );
   const [ollamaUrl, setOllamaUrl] = useState("http://127.0.0.1:11434");
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [ollamaError, setOllamaError] = useState("");
@@ -176,6 +180,27 @@ export function VaultPanel() {
     setMsgs((m) => ({ ...m, [id]: "Key saved to OS keychain" }));
     setTimeout(() => setMsgs((m) => ({ ...m, [id]: "" })), 2500);
     load();
+  };
+
+  const testApiKey = async (id: string) => {
+    setTest((t) => ({ ...t, [id]: { running: true, ok: null } }));
+    try {
+      const res = await api.post<ProviderTest>(`/providers/${id}/test`);
+      setTest((t) => ({
+        ...t,
+        [id]: { running: false, ok: res.ok, error: res.error },
+      }));
+    } catch (e) {
+      setTest((t) => ({
+        ...t,
+        [id]: { running: false, ok: false, error: e instanceof Error ? e.message : String(e) },
+      }));
+    }
+  };
+
+  const testAllKeys = async () => {
+    const withKeys = status.providers.filter((p) => configured(p.key_ref));
+    await Promise.all(withKeys.map((p) => testApiKey(p.id)));
   };
 
   const saveOllamaUrl = async () => {
@@ -449,14 +474,24 @@ export function VaultPanel() {
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <h4 className="text-xs font-semibold uppercase tracking-wider text-meruem-accent">
-              LLM Providers (OpenAI-compatible)
+              API Key Bank (encrypted)
             </h4>
-            <Badge tone="neutral">{status.providers.length} active</Badge>
+            <div className="flex items-center gap-1.5">
+              <Badge tone={status.providers.length ? "blue" : "neutral"}>
+                {status.providers.length} provider(s)
+              </Badge>
+              <Button size="sm" variant="outline" onClick={testAllKeys}>
+                Test all keys
+              </Button>
+            </div>
           </div>
           <p className="text-[11px] text-meruem-muted">
-            Providers run in order, top to bottom. Add any OpenAI-compatible
-            endpoint (Gemini, Groq, OpenRouter, vLLM, or a paid cloud service)
-            — no code changes needed. Local Ollama is the final fallback.
+            Keys are stored encrypted in your OS keychain (never in the DB or
+            sent to the UI). Press{" "}
+            <span className="text-meruem-accent">Test</span> to live-verify the
+            key against the provider's API and see a green/red indicator.
+            Providers run in order, top to bottom. Local Ollama is the final
+            fallback for every agent.
           </p>
 
           {status.providers.map((p, idx) => (
@@ -468,11 +503,20 @@ export function VaultPanel() {
                   <span className="text-xs font-medium text-meruem-text">
                     {idx + 1}. {p.name}
                   </span>
+                  {/* Live key verification indicator */}
+                  {test[p.id]?.running ? (
+                    <Badge tone="gold">testing…</Badge>
+                  ) : test[p.id]?.ok === true ? (
+                    <Badge tone="green">key works</Badge>
+                  ) : test[p.id]?.ok === false ? (
+                    <Badge tone="red">key rejected</Badge>
+                  ) : configured(p.key_ref) ? (
+                    <Badge tone="blue">stored</Badge>
+                  ) : (
+                    <Badge tone="neutral">no key</Badge>
+                  )}
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <Badge tone={configured(p.key_ref) ? "green" : "neutral"}>
-                    {configured(p.key_ref) ? "key set" : "no key"}
-                  </Badge>
                   <Badge tone={p.enabled ? "green" : "red"}>{p.enabled ? "on" : "off"}</Badge>
                   <Button size="sm" variant="danger" onClick={() => removeProvider(p.id)}>×</Button>
                 </div>
@@ -489,7 +533,7 @@ export function VaultPanel() {
                 </label>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Button size="sm" variant="success" onClick={() => saveKey(p.key_ref, p.id)}>Save API Key</Button>
                 <label className="flex flex-1 items-center gap-1 text-[11px] text-meruem-muted">
                   <Input
@@ -499,11 +543,25 @@ export function VaultPanel() {
                     placeholder={configured(p.key_ref) ? "Key stored — enter to replace" : "Paste API key"}
                   />
                 </label>
+                <Button size="sm" variant="outline" onClick={() => testApiKey(p.id)}>
+                  Test
+                </Button>
                 <Button size="sm" variant={p.enabled ? "ghost" : "default"} onClick={() => updateProvider(p.id, { enabled: !p.enabled })}>
                   {p.enabled ? "Disable" : "Enable"}
                 </Button>
               </div>
               {msgs[p.id] && <p className="text-[11px] text-meruem-green">{msgs[p.id]}</p>}
+              {(() => {
+                const t = test[p.id];
+                if (t?.ok === false && t.error) {
+                  return (
+                    <p className="text-[11px] text-meruem-red" title={t.error}>
+                      {t.error.length > 160 ? `${t.error.slice(0, 160)}…` : t.error}
+                    </p>
+                  );
+                }
+                return null;
+              })()}
             </div>
           ))}
 

@@ -600,6 +600,13 @@ class BacktestEngine:
         status = "stalled"
         current = code
         confluence = dict(confluence or {})
+        # Detect code that can never fire (e.g. an LLM emitted a strategy whose
+        # entry requires mutually-exclusive same-bar conditions). Substitute a
+        # guaranteed-trades heuristic baseline so the optimize/repair loop has
+        # real setups to improve instead of a permanently-empty result.
+        from app.agents.strategy_codegen import heuristic_strategy
+        fallback_code = heuristic_strategy()["code"]
+        forced_fallback = False
 
         for it in range(max_iterations):
             try:
@@ -619,6 +626,28 @@ class BacktestEngine:
                 if best is not None:
                     break  # a later repair broke the code — keep the best we had
                 raise ValueError(f"Generated strategy failed to run: {exc}")
+
+            total_trades = train_m["n_trades"] + test_m["n_trades"]
+            if total_trades == 0:
+                if not forced_fallback:
+                    # First try: the generated strategy never fires. Swap in the
+                    # safe heuristic baseline and let the repair loop improve it.
+                    current = fallback_code
+                    forced_fallback = True
+                    iterations.append({
+                        "iteration": it,
+                        "accepted": False,
+                        "spec": confluence,
+                        "train": train_m,
+                        "test": test_m,
+                        "rationale": ("Generated strategy produced 0 trades — "
+                                      "substituted the heuristic baseline and "
+                                      "continuing the refine loop."),
+                        "code_changed": True,
+                    })
+                    continue
+                # Repair loop also kept producing dead code — nothing useful.
+                break
 
             score = _composite(test_m)
             train_score = _composite(train_m)

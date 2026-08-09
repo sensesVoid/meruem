@@ -310,22 +310,30 @@ def _run_worker(job_id: str, payload: dict) -> None:
     min_winrate = float(payload.get("min_winrate") or 55.0)
     min_sharpe = float(payload.get("min_sharpe") or 1.0)
     concept = (payload.get("concept_markdown") or "").strip()
+    references = _reference_sources(exclude_id=payload.get("strategy_id"))
 
     strat = None
     strat_id: str | None = None
     drafted_entry = False
     draft: dict = {}
     try:
-        if not concept:
+        if not concept and not references:
             raise RuntimeError(
-                "A trading concept is required. Describe your idea and the "
-                "Synthesizer Agent will build the entry criteria for it.")
+                "A trading concept is required. Describe your idea (or save "
+                "reference documents) and the Synthesizer Agent will build the "
+                "entry criteria for it.")
 
         _set(job_id, status="running", stage="synth", progress=0.03,
              message="Synthesizing entry criteria from concept (grounded on RAG)…")
 
         submitted_entry = (payload.get("body_markdown") or "").strip()
         concept = (concept or submitted_entry).strip()
+        # When no concept was typed but the library has references, keep the saved
+        # strategy row readable: store a source summary derived from the references.
+        if not concept and references:
+            concept = "Synthesized from the saved reference documents:\n" + "\n".join(
+                f"- {r.get('name') or 'Reference Strategy'}" for r in references
+            )
 
         # AUTO-SYNTHESIS (single path concept->entry, #8): the Synthesizer Agent
         # (RAG-grounded) ALWAYS derives the executable ENTRY CRITERIA from the
@@ -339,7 +347,7 @@ def _run_worker(job_id: str, payload: dict) -> None:
                 payload["name"], concept, notes="",
                 symbol=symbol, timeframe=timeframe,
                 asset_class=payload.get("asset_class") or "",
-                references=_reference_sources(exclude_id=payload.get("strategy_id")),
+                references=references,
             )
         qa = draft.get("qa") or {}
         ir = draft.get("ir") or {}

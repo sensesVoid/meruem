@@ -43,27 +43,130 @@ _cache: dict[tuple[str, str, int], tuple[float, list[dict]]] = {}
 _cache_provider: dict[tuple[str, str, int], str] = {}
 
 
+# Fiat quote suffixes stripped from crypto bases (order matters: USDT before
+# USD so "BTCUSDT" never has its trailing "T" misread as part of "USD").
+_QUOTE_SUFFIXES = ("USDT", "USDC", "BUSD", "USD")
+
+FX_CURRENCIES = {"USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD"}
+FX_METALS = {"XAUUSD", "XAGUSD", "XPTUSD", "XPDUSD"}
+
+
+def _strip_quote(symbol: str) -> str:
+    """Remove a trailing fiat quote suffix if present.
+
+    Practically the same as `symbol.rstrip("USDT")` but fixes the classic
+    `rstrip` bug that also eats letters from the BASE when the base itself
+    ends in a stripped character (e.g. ``BTCUSDT -> BT``, ``LTCUSDT -> LT``).
+    """
+    sym = symbol.upper()
+    for suffix in _QUOTE_SUFFIXES:
+        if sym.endswith(suffix) and len(sym) > len(suffix):
+            return sym[: -len(suffix)]
+    return sym
+
+
 def _is_crypto(symbol: str) -> bool:
-    for suffix in ("USDT", "USDC", "USD"):
-        if symbol.endswith(suffix) and symbol[: -len(suffix)] in CRYPTO:
-            return True
+    return _strip_quote(symbol) in CRYPTO
+
+
+def _crypto_quote(symbol: str) -> str | None:
+    """Return the Binance-native quote suffix (``USDT``/``USDC``/``BUSD``) if
+    the symbol carries one, else ``None``.
+
+    These quotes only exist as exchange pairs on Binance — the MT5 terminal
+    never serves ``BTCUSDT``, so it must be skipped entirely for them.
+    """
+    sym = symbol.upper()
+    for suffix in ("USDT", "USDC", "BUSD"):
+        if sym.endswith(suffix) and len(sym) > len(suffix):
+            return suffix
+    return None
+
+
+def _binance_only(symbol: str) -> bool:
+    """True when the symbol is Binance-only (``USDT``/``USDC`` quoted) and
+    should never be attempted on the local MT5 terminal."""
+    return _crypto_quote(symbol) is not None
+
+
+def _plain_usd_crypto(symbol: str) -> bool:
+    """True for a crypto base quoted in plain ``USD`` (e.g. ``BTCUSD``,
+    ``ETHUSD``) — the broker CFD convention that MT5 serves (as opposed to
+    ``BTCUSDT`` which only exists on Binance)."""
+    sym = symbol.upper()
+    if any(sym.endswith(s) for s in ("USDT", "USDC", "BUSD")):
+        return False
+    return sym.endswith("USD") and _strip_quote(sym) in CRYPTO
+
+
+def _binance_routed(symbol: str, asset_class: str | None = None) -> bool:
+    """Decide whether Binance should be tried BEFORE the MT5 terminal:
+
+    - a crypto/cripto asset_class hint, or
+    - a Binance-native quote (``BTCUSDT`` / ``ETHUSDC``…), or
+    - a bare crypto base (``BTC`` → Binance ``BTCUSDT``).
+
+    Plain-``USD`` crypto (``BTCUSD``) is intentionally NOT Binance-first —
+    that symbol is a CFD on the local MT5 terminal and must be fetched from
+    there first (Binance/Yahoo are the fallbacks).
+    """
+    cls = (asset_class or "").strip().lower()
+    if cls in ("crypto", "cripto", "cryptocurrency", "digital"):
+        return True
+    if _crypto_quote(symbol) is not None:
+        return True
+    return _strip_quote(symbol) in CRYPTO and not _plain_usd_crypto(symbol)
+
+
+def _looks_like_fx(symbol: str) -> bool:
+    """Heuristic: 6-letter codes such as EURUSD / GBPJPY and the X-metal codes
+    are treated as FX/metals (Yahoo ``=X`` convention); otherwise the symbol is
+    left bare (US stocks/ETFs like ``AAPL``, ``SPY``)."""
+    sym = symbol.upper()
+    if sym in FX_METALS:
+        return True
+    if len(sym) == 6 and sym.isalpha():
+        base, quote = sym[:3], sym[3:]
+        return (base.startswith("X") or base in FX_CURRENCIES) and quote in FX_CURRENCIES
     return False
 
 
-def yahoo_symbol(symbol: str) -> str:
-    if _is_crypto(symbol):
-        base = symbol.rstrip("USDT").rstrip("USDC").rstrip("USD")
+def yahoo_symbol(symbol: str, asset_class: str | None = None) -> str:
+    """Map an internal symbol to the Yahoo Finance chart ticker.
+
+    - Crypto           → ``BASE-USD`` (``BTCUSDT``/``BTCUSD``/``BTC`` → ``BTC-USD``)
+    - FX / metals      → ``EURUSD=X`` / ``XAUUSD=X``
+    - Stocks / ETFs    → bare ticker (``AAPL``, ``SPY``)
+    The asset_class hint (forex/crypto/stock/commodities…) disambiguates the
+    ambiguous 6-letter codes when the caller knows it.
+    """
+    cls = (asset_class or "").strip().lower()
+    base = _strip_quote(symbol)
+    if _is_crypto(symbol) or cls in ("crypto", "cripto", "cryptocurrency", "digital"):
         return f"{base}-USD"
     if symbol.endswith("=X"):
-        return symbol
-    return f"{symbol}=X"  # FX / metals convention used by Yahoo.
+        return symbol.upper()
+    if cls in ("stock", "equity", "etf", "index", "share"):
+        return base or symbol.upper()
+    if _looks_like_fx(symbol) or cls in ("forex", "fx", "currency", "commodities", "commodity", "metal", "metals", "indexes"):
+        return f"{symbol.upper()}=X"
+    return symbol.upper()
 
 
 def binance_symbol(symbol: str) -> str:
-    for suffix in ("USDT", "USDC", "USD"):
-        if symbol.endswith(suffix) and symbol[: -len(suffix)] in CRYPTO:
-            return f"{symbol[: -len(suffix)]}{suffix}"
-    return symbol
+    """Map a crypto symbol to the Binance kline ticker (BASE + quote).
+
+    ``BTCUSDT`` stays ``BTCUSDT``; ``BTCUSD`` → ``BTCUSD``; a bare base such as
+    ``BTC`` / ``ETH`` defaults to the ``USDT`` quote so the default watchlist
+    style keeps working on Binance.
+    """
+    sym = symbol.upper()
+    if _is_crypto(sym):
+        base = _strip_quote(sym)
+        if base != sym:
+            return sym
+        return f"{base}USDT"
+    return sym
 
 
 # FX / metals that Yahoo only serves via a futures ticker (spot =X is dead).
@@ -97,7 +200,8 @@ class MarketDataService:
         pass
 
     async def fetch(self, symbol: str, timeframe: str = "15m", limit: int = 500,
-                    preferred: str | None = None) -> dict:
+                    preferred: str | None = None,
+                    asset_class: str | None = None) -> dict:
         key = (symbol, timeframe, limit)
         now = time.time()
         hit = _cache.get(key)
@@ -109,9 +213,12 @@ class MarketDataService:
                 "provider": _cache_provider.get(key, ""),
             }
 
+        binance_first = _binance_routed(symbol, asset_class)
+
         # Preferred provider (usually the configured master broker) is tried
-        # first for non-crypto symbols; crypto still routes to Binance first.
-        if preferred and not _is_crypto(symbol):
+        # first for non-Binance-first symbols; Binance-native crypto still
+        # routes to Binance.
+        if preferred and not binance_first:
             if preferred == "Binance":
                 candles = await self._binance_public(symbol, timeframe, limit)
                 if candles:
@@ -126,16 +233,21 @@ class MarketDataService:
                     return {"symbol": symbol, "timeframe": timeframe, "candles": candles, "provider": provider}
 
         # Crypto is best served by Binance (authoritative, includes 4h/1M);
-        # Yahoo is the fallback. For forex & metals use the local MT5
-        # terminal first (authoritative 4H candles); Yahoo is the fallback.
-        if _is_crypto(symbol):
+        # Yahoo is the fallback. For forex, metals & plain-USD crypto CFDs
+        # (BTCUSD) use the local MT5 terminal first (authoritative 4H candles);
+        # Binance + Yahoo act as fallbacks.
+        if binance_first:
             candles, provider = await self._binance(symbol, timeframe, limit)
             if not candles:
-                candles, provider = await self._yahoo(symbol, timeframe, limit)
+                candles, provider = await self._yahoo(symbol, timeframe, limit, asset_class=asset_class)
         else:
             candles, provider = await self._mt5(symbol, timeframe, limit)
+            if not candles and _plain_usd_crypto(symbol):
+                # MT5 does not serve the CFD right now → Binance is still a
+                # valid crypto fallback before Yahoo.
+                candles, provider = await self._binance(symbol, timeframe, limit)
             if not candles:
-                candles, provider = await self._yahoo(symbol, timeframe, limit)
+                candles, provider = await self._yahoo(symbol, timeframe, limit, asset_class=asset_class)
 
         _cache[key] = (now, candles)
         _cache_provider[key] = provider
@@ -147,22 +259,27 @@ class MarketDataService:
         }
 
     async def fetch_range(self, symbol: str, timeframe: str = "15m",
-                          start: int = 0, end: int = 0) -> tuple[list[dict], str]:
+                          start: int = 0, end: int = 0,
+                          asset_class: str | None = None) -> tuple[list[dict], str]:
         """Candles within an EXACT date window ``[start, end]`` (epoch seconds).
 
         Provider order mirrors :meth:`fetch`: MT5 range for forex/metals, paged
         Binance klines for crypto, Yahoo ``period1/period2`` as the fallback.
         Returns ``(candles, provider)``.
         """
-        if _is_crypto(symbol):
+        if _binance_routed(symbol, asset_class):
             candles = await self._binance_range(symbol, timeframe, start, end)
             if candles:
                 return candles, "binance"
-            return await self._yahoo_range(symbol, timeframe, start, end)
+            return await self._yahoo_range(symbol, timeframe, start, end, asset_class=asset_class)
         candles, provider = await self._mt5_range(symbol, timeframe, start, end)
         if candles:
             return candles, provider
-        return await self._yahoo_range(symbol, timeframe, start, end)
+        if _plain_usd_crypto(symbol):
+            candles = await self._binance_range(symbol, timeframe, start, end)
+            if candles:
+                return candles, "binance"
+        return await self._yahoo_range(symbol, timeframe, start, end, asset_class=asset_class)
 
     async def _binance_public(self, symbol: str, timeframe: str, limit: int) -> list[dict]:
         return (await self._binance(symbol, timeframe, limit))[0]
@@ -227,11 +344,11 @@ class MarketDataService:
         return out
 
     async def _yahoo_range(self, symbol: str, timeframe: str, start: int,
-                           end: int) -> tuple[list[dict], str]:
+                           end: int, asset_class: str | None = None) -> tuple[list[dict], str]:
         interval = YAHOO_INTERVAL.get(timeframe)
         if interval is None or end <= start:
             return [], "yahoo"
-        tickers = [yahoo_symbol(symbol)]
+        tickers = [yahoo_symbol(symbol, asset_class)]
         fb = FUTURES_FALLBACK.get(symbol)
         if fb and fb not in tickers:
             tickers.append(fb)
@@ -257,14 +374,15 @@ class MarketDataService:
             return candles, "mt5"
         return [], "mt5"
 
-    async def _yahoo(self, symbol: str, timeframe: str, limit: int) -> tuple[list[dict], str]:
+    async def _yahoo(self, symbol: str, timeframe: str, limit: int,
+                     asset_class: str | None = None) -> tuple[list[dict], str]:
         interval = YAHOO_INTERVAL.get(timeframe)
         if interval is None:  # 4h is not offered by this endpoint
             return [], "yahoo"
 
         # Try the mapped ticker first; if the provider rejects it (e.g. dead
         # spot FX ticker), fall back to the futures ticker for that symbol.
-        tickers = [yahoo_symbol(symbol)]
+        tickers = [yahoo_symbol(symbol, asset_class)]
         fb = FUTURES_FALLBACK.get(symbol)
         if fb and fb not in tickers:
             tickers.append(fb)

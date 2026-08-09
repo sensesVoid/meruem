@@ -120,6 +120,25 @@ def test_validate_accepts_good_code():
     res = dry_run_strategy(cls, _df())
     assert res["ok"], res
 
+
+BAD_SIZE_CODE = GOOD_CODE.replace(
+    "            size = self._risk_size(self.equity, self.risk_pct, p - sl, p)",
+    "            size = self.risk_pct * self.equity / (p - sl)",
+).replace(
+    "            size = self._risk_size(self.equity, self.risk_pct, sl - p, p)",
+    "            size = self.risk_pct * self.equity / (sl - p)",
+)
+
+
+def test_bad_fractional_size_is_normalized_and_runs():
+    """Regression: a raw `risk_pct*equity/distance` formula yields fractional
+    unit counts (e.g. 312.5) that historically crashed `dry_run_strategy` /
+    `Backtest.run()` with 'size must be ...'. The sandbox wrapper must round them."""
+    cls = build_strategy_class(BAD_SIZE_CODE)
+    res = dry_run_strategy(cls, _df())
+    assert res["ok"], res
+    assert res["trades"] > 0
+
 def test_validate_rejects_os_import():
     bad = GOOD_CODE.replace("import math", "import os\nimport math")
     ok, err = validate_code(bad)
@@ -144,6 +163,22 @@ def test_validate_rejects_missing_generated_strategy():
         raise AssertionError("should have rejected missing GeneratedStrategy")
     except Exception:
         pass
+
+
+def test_build_wraps_buy_sell_size_normalization():
+    """LLM-generated strategies that compute a fractional unit count >= 1 (e.g.
+    312.5 from risk_pct*equity/stop_distance) must be normalized to a whole
+    number of units so the backtesting broker never receives an invalid size."""
+    from app.services.code_sandbox import _normalize_order_size
+
+    assert _normalize_order_size(0.02) == 0.02       # fraction of equity
+    assert _normalize_order_size(0.999) == 0.999
+    assert _normalize_order_size(312.5) == 312.0     # -> whole units
+    assert _normalize_order_size(2.4) == 2.0
+    assert _normalize_order_size(0.6) == 0.6
+    assert _normalize_order_size(1) == 1.0
+    assert _normalize_order_size(1.001) == 1.0
+    assert _normalize_order_size(None) is None
 
 
 def test_codegen_generate_and_repair_pass_concept(monkeypatch):
@@ -227,6 +262,85 @@ def test_pipeline_uses_generated_code_and_persists_confluence(client):
     assert row["params_json"], "confluence params must be persisted"
     assert row["concept_markdown"].startswith("Momentum strategy"), \
         "the trading concept must be persisted as-is"
+
+
+def test_refine_loop_substitutes_baseline_when_code_is_dead(session, monkeypatch):
+    """Regression: LLM-generated code that can never fire (e.g. a breakout AND a
+    same-bar sweep of the opposite extreme — mutually exclusive) yields 0 trades.
+    The refine loop must detect the dead code and swap in a guaranteed-trades
+    baseline so the optimize/repair loop has real setups to improve."""
+    from app.services import backtest_engine as be_mod
+    from app.services.backtest_engine import BacktestEngine
+    from app.models.entities import Strategy
+
+    fake_df = _df()
+    monkeypatch.setattr(be_mod, "_load_df",
+                        lambda *a, **k: (fake_df, "test"))
+    monkeypatch.setattr(
+        "app.agents.strategy_codegen.heuristic_strategy",
+        lambda: {"code": GOOD_CODE, "confluence": {},
+                 "notes": "baseline", "provider": "test"})
+
+    strat = Strategy(id="dead-strategy-1", name="Dead",
+                     concept_markdown="breakout + sweep",
+                     body_markdown="1. Buy on breakout AND same-bar sweep.",
+                     status="draft")
+    session.add(strat)
+    session.commit()
+
+    # Dead code: entry condition is mathematically impossible — price must close
+    # ABOVE the prior N-bar high (breakout) while its LOW pierces the same prior
+    # N-bar low (sweep) on the SAME bar. Such a bar does not exist on this data,
+    # so the faithful backtest always yields 0 trades (mirrors the reported bug).
+    DEAD_CODE = """
+import numpy as np
+import pandas as pd
+import math
+from backtesting import Strategy
+
+class GeneratedStrategy(Strategy):
+    risk_pct = 0.01
+    period = 20
+
+    def init(self):
+        highs = self.data.High
+        lows = self.data.Low
+        closes = self.data.Close
+        self.breakout_high = self.I(lambda h: pd.Series(h).shift(1).rolling(self.period).max(), highs)
+        self.sweep_low = self.I(lambda l: pd.Series(l).shift(1).rolling(self.period).min(), lows)
+        self.atr = self.I(lambda h, l, c, p=self.period: pd.Series(
+            np.maximum(h - l, np.maximum((h - pd.Series(c).shift(1)).abs(), (l - pd.Series(c).shift(1)).abs()))).rolling(p).mean().values,
+            highs, lows, closes)
+
+    def next(self):
+        if self.position:
+            return
+        i = len(self.data) - 1
+        if i < self.period + 1:
+            return
+        c = self.data.Close[i]
+        l = self.data.Low[i]
+        bh = self.breakout_high[i]
+        sw = self.sweep_low[i]
+        atr = self.atr[i]
+        if not all(math.isfinite(v) for v in (c, l, bh, sw, atr)) or atr <= 0:
+            return
+        if c > bh and l < sw and c > sw:
+            sl = c - atr * 1.5
+            tp = c + atr * 2.0
+            size = min(self.risk_pct * self.equity / (c - sl), self.equity / c)
+            self.buy(size=size, sl=sl, tp=tp)
+"""
+
+    engine = BacktestEngine()
+    res = engine.refine_code_loop(
+        session, strat, "EURUSD", "5m", DEAD_CODE, bars=400,
+        max_iterations=2, min_winrate=50.0, min_sharpe=1.0,
+    )
+    assert res["best"] is not None, "refine loop must recover a tradeable setup"
+    assert res["best"]["test"]["n_trades"] > 0, (
+        "dead code must be replaced by a baseline that actually trades")
+    assert res["iterations"], "iteration trace must be recorded"
 
 
 def test_manual_backtest_runs_faithful_code_when_present(client):

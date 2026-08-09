@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
-import { api, Strategy, StrategyPipelineJob } from "@/lib/api";
+import { api, Asset, Strategy, StrategyPipelineJob } from "@/lib/api";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input, Textarea } from "@/components/ui/input";
+import { Input, Select, Textarea } from "@/components/ui/input";
 import { BacktestPanel } from "@/components/BacktestPanel";
 import { SynthesisDiagnostics } from "@/components/SynthesisDiagnostics";
+
+const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1D", "1W", "1M"];
 
 type Gate = NonNullable<StrategyPipelineJob["gate"]>;
 
@@ -138,6 +140,10 @@ export function StrategyLibraryPanel() {
   const [pollRef, setPollRef] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [symbol, setSymbol] = useState("EURUSD");
+  const [tf, setTf] = useState("5m");
+  const [bars, setBars] = useState(6000);
   const running = pollRef !== null;
 
   const clearForm = () => {
@@ -162,25 +168,40 @@ export function StrategyLibraryPanel() {
     load();
   }, []);
   useEffect(() => {
+    api.get<Asset[]>("/assets").then((list) => {
+      setAssets(list);
+    }).catch(() => {});
+  }, []);
+  useEffect(() => {
     return () => {
       if (pollRef !== null) window.clearInterval(pollRef);
     };
   }, [pollRef]);
 
   const submit = async (strategyId?: string) => {
-    if (!name.trim() || !concept.trim()) {
-      setError("Enter a strategy name and a trading concept first.");
+    const hasReferences = strategies.some((s) => s.status === "reference");
+    if (!name.trim() && !strategyId && !hasReferences) {
+      setError("Enter a strategy name first (or save reference documents to synthesize).");
       return;
     }
+    if (!concept.trim() && !hasReferences) {
+      setError("Enter a trading concept first (or save reference documents to synthesize).");
+      return;
+    }
+    const finalName = name.trim() || (strategies.find((s) => s.id === strategyId)?.name) ||
+      `Synthesized ${new Date().toISOString().slice(0, 10)}`;
     setError("");
     setInfo("");
     setSavedId(null);
     try {
       const { job_id } = await api.post<{ job_id: string }>("/strategies/submit", {
-        name,
+        name: finalName,
         concept_markdown: concept,
         body_markdown: body,
         strategy_id: strategyId ?? null,
+        symbol,
+        timeframe: tf,
+        bars,
       });
       const interval = window.setInterval(async () => {
         try {
@@ -317,6 +338,19 @@ export function StrategyLibraryPanel() {
       <>
           <div className="mb-3 space-y-1.5 rounded-md border border-meruem-border p-2">
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Strategy name" />
+            <div className="flex flex-wrap items-end gap-1.5">
+              <Select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="w-24" title="Symbol the synthesized strategy is backtested on">
+                {assets.map((a) => <option key={a.id} value={a.symbol}>{a.symbol}</option>)}
+                {assets.length === 0 && <option value="EURUSD">EURUSD</option>}
+              </Select>
+              <Select value={tf} onChange={(e) => setTf(e.target.value)} className="w-20" title="Timeframe the synthesized strategy is backtested on">
+                {TIMEFRAMES.map((t) => <option key={t} value={t}>{t}</option>)}
+              </Select>
+              <div className="flex items-center gap-1">
+                <span className="text-[10px] text-meruem-muted">bars</span>
+                <Input type="number" value={bars} min={100} onChange={(e) => setBars(Number(e.target.value))} className="w-20" />
+              </div>
+            </div>
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-meruem-muted">Trading concept</p>
               <Button

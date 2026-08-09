@@ -67,9 +67,29 @@ def validate_code(code: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _normalize_order_size(size):
+    """Backtesting requires a `size` that is a fraction of equity (0<size<1) or a
+    whole number of units (round(size)==size). LLM code frequently computes
+    `risk_pct*equity/stop_distance`, which lands between 1 and an integer (e.g.
+    312.5) — impossible for the broker. Map those to whole units."""
+    if size is None:
+        return size
+    try:
+        s = float(size)
+    except (TypeError, ValueError):
+        return size
+    if not (s > 0):
+        return size
+    if s < 1:
+        return s  # fractional equity allocation
+    return float(int(round(s)) or 1)  # whole number of units
+
+
 def build_strategy_class(code: str) -> type:
     """Compile + exec the generated code into a fresh module and return the
-    GeneratedStrategy class. Call only after validate_code() passed."""
+    GeneratedStrategy class. Compilation happens only after validate_code()
+    passed. Order sizes are normalized through the buy/sell call sites so that
+    valid-but-fractional unit counts can never crash the backtest."""
     ok, err = validate_code(code)
     if not ok:
         raise UnsafeCodeError(err)
@@ -85,6 +105,30 @@ def build_strategy_class(code: str) -> type:
             break
     if cls is None:
         raise UnsafeCodeError("generated code did not define 'GeneratedStrategy'")
+
+    for method in ("buy", "sell"):
+        base = getattr(cls, method)
+        def wrap(size_sanitizer=_normalize_order_size, base=base):
+            def inner(self, *args, **kwargs):
+                if "size" in kwargs:
+                    kwargs["size"] = size_sanitizer(kwargs["size"])
+                return base(self, *args, **kwargs)
+            return inner
+        setattr(cls, method, wrap())
+
+    # Defensive next(): generated code checks SL/TP geometry against the CURRENT
+    # close, but the broker fills at the NEXT bar's open. A gap can make a
+    # single bar's order invalid (e.g. TP >= entry on a short). That one bar
+    # must be skipped, not allowed to crash the whole backtest run.
+    base_next = getattr(cls, "next")
+    def wrap_next(base=base_next):
+        def inner(self, *args, **kwargs):
+            try:
+                return base(self, *args, **kwargs)
+            except ValueError:
+                return None
+        return inner
+    setattr(cls, "next", wrap_next())
     return cls
 
 

@@ -5,6 +5,12 @@ __pycache__/
 backend/meruem.db
 chroma_data/
 
+# Downloaded market-data parquets (regenerable via the Datasets tab)
+backend/data/
+
+# Runtime logs
+logs/
+
 # Node
 frontend/node_modules/
 frontend/dist/

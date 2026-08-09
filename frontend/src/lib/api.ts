@@ -197,6 +197,15 @@ export interface OllamaTest {
   models?: number;
 }
 
+export interface ProviderTest {
+  ok: boolean;
+  provider: string;
+  model: string;
+  latency_ms?: number;
+  reply?: string;
+  error?: string;
+}
+
 export interface ConnResult {
   ok: boolean;
   detail?: string;
@@ -717,6 +726,12 @@ export interface RiskClearanceResult {
   };
 }
 
+export interface DatasetWarn {
+  provider: string;
+  ok: boolean;
+  error: string;
+}
+
 export interface DatasetItem {
   id: string;
   symbol: string;
@@ -727,6 +742,8 @@ export interface DatasetItem {
   file_size_bytes: number;
   file_size_mb: number;
   file_path: string;
+  provider?: string;
+  warnings?: DatasetWarn[];
   updated_at: string;
 }
 
