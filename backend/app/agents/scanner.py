@@ -20,7 +20,8 @@ class ScannerAgent:
         )
 
     def scan(self, ohlcv: dict, indicators: dict, strategies: list[dict],
-             references: list[dict] | None = None) -> dict:
+             references: list[dict] | None = None,
+             ml_context: list[dict] | None = None) -> dict:
         rules = json.dumps(strategies, default=str)[:8000]
         refs_block = ""
         if references:
@@ -28,13 +29,21 @@ class ScannerAgent:
                 "\nREFERENCE CONCEPTS LIBRARY (context only — NOT executable rules):\n"
                 f"{json.dumps(references, default=str)[:4000]}\n"
             )
+        ml_block = ""
+        if ml_context:
+            ml_block = (
+                "\nML ARTIFACT CONTEXT FILES (context only — human notes / model "
+                "insights uploaded by the trader; use them to sharpen the read, "
+                "never to contradict the approved rules):\n"
+                f"{json.dumps(ml_context, default=str)[:6000]}\n"
+            )
         user = (
             f"Asset: {ohlcv.get('symbol')} ({ohlcv.get('asset_class', '')})\n"
             f"Timeframe: {ohlcv.get('timeframe')}\n"
             f"Latest OHLCV bars: {json.dumps(ohlcv.get('rows', [])[-8:])}\n"
             f"Computed indicators: {json.dumps(indicators)}\n"
             f"APPROVED STRATEGY RULES (the ONLY rules you may act on):\n{rules}\n"
-            f"{refs_block}"
+            f"{refs_block}{ml_block}"
             "Produce the candidate JSON now."
         )
         prompt = f"{SCANNER_SYSTEM_PROMPT}\n\n{user}"

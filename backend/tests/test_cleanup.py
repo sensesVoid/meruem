@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from app.models.entities import BacktestRun, Scan, Trade, Validation
+from app.models.entities import Scan, Trade, Validation
 from app.services.cleanup import DataCleanupService
 
 
@@ -52,16 +52,6 @@ def test_cleanup_retention_zero_disables(session):
     result = DataCleanupService(session, retention_days=0).cleanup()
     assert result["enabled"] is False
     assert session.get(Scan, "s") is not None
-
-
-def test_cleanup_deletes_old_backtests(session):
-    old_bt = BacktestRun(id="bt-old", strategy_id="strat", symbol="XAUUSD", timeframe="15m",
-                         spec_json="{}", metrics_json="{}", created_at=datetime.now(timezone.utc) - timedelta(days=200))
-    session.add(old_bt)
-    session.commit()
-    result = DataCleanupService(session, retention_days=90).cleanup()
-    assert result["deleted"].get("backtest_runs") == 1
-    assert session.get(BacktestRun, "bt-old") is None
 
 
 def test_cleanup_cascades_validations_with_scans(session):

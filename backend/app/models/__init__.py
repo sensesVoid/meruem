@@ -7,7 +7,6 @@ convenience; each name is intentionally unused in this module.
 from app.models.entities import (  # noqa: F401
     Account,
     Asset,
-    BacktestRun,
     LTRRecord,
     Scan,
     Setting,

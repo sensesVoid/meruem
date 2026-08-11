@@ -272,22 +272,3 @@ def test_synthesize_offline_ir_valid(monkeypatch):
     d = SynthesizerAgent().synthesize("IR", "Breakout momentum.")
     assert d["provider"] == "heuristic"
     assert d["ir"]["status"] == "SUCCESS"
-
-
-def test_codegen_prompt_includes_ir_blueprint(monkeypatch):
-    """The compiled IR blueprint is passed into the codegen prompt."""
-    from app.agents.strategy_codegen import StrategyCodeGen
-
-    seen = {}
-
-    def fake_generate(self, title, concept, markdown, symbol, timeframe,
-                      ir_blueprint=None):
-        seen["bp"] = ir_blueprint
-        return {"code": "class GeneratedStrategy(Strategy):\n    pass",
-                "confluence": {}, "notes": "x", "provider": "t"}
-
-    monkeypatch.setattr(StrategyCodeGen, "generate", fake_generate)
-    StrategyCodeGen().generate("N", "C", "E", "EURUSD", "1h",
-                               ir_blueprint=[{"primitive": "BREAKOUT",
-                                              "args": {"n": 20}}])
-    assert seen["bp"][0]["primitive"] == "BREAKOUT"

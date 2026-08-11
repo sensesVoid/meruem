@@ -69,10 +69,26 @@ def _migrate() -> None:
                 conn.execute(text("ALTER TABLE strategies ADD COLUMN params_json VARCHAR DEFAULT ''"))
             if "qa_notes" not in existing:
                 conn.execute(text("ALTER TABLE strategies ADD COLUMN qa_notes VARCHAR DEFAULT ''"))
-            if "strategy_code" not in existing:
-                conn.execute(text("ALTER TABLE strategies ADD COLUMN strategy_code VARCHAR DEFAULT ''"))
-            if "concept_markdown" not in existing:
-                conn.execute(text("ALTER TABLE strategies ADD COLUMN concept_markdown VARCHAR DEFAULT ''"))
+
+    _drop_obsolete(insp)
+
+
+def _drop_obsolete(insp) -> None:
+    """Retire tables/columns removed by the slimming refactor (backtest runs,
+    GP evolution, strategy provenance/code). Idempotent so a fresh DB is fine."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        for table in ("backtest_runs", "evolution_runs", "evolution_genome_results"):
+            if insp.has_table(table):
+                conn.execute(text(f"DROP TABLE {table}"))
+
+    if insp.has_table("strategies"):
+        existing = {c["name"] for c in insp.get_columns("strategies")}
+        with engine.begin() as conn:
+            for col in ("asset_class", "timeframe", "strategy_code", "ir_blueprint_json"):
+                if col in existing:
+                    conn.execute(text(f"ALTER TABLE strategies DROP COLUMN {col}"))
 
 
 def get_session():

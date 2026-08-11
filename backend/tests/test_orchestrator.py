@@ -9,11 +9,11 @@ import pytest
 from app.models.entities import Asset, Scan, Strategy, Validation
 
 
-def _strategy(session, name, asset_class="forex", status="active", params=None):
+def _strategy(session, name, status="active", params=None):
     s = Strategy(
         id=f"s-{name.lower().replace(' ', '-')}", name=name,
         body_markdown=f"Rules for {name}: buy SMA fast > slow with RSI filter.",
-        asset_class=asset_class, timeframe="15m", status=status,
+        status=status,
         params_json=json.dumps(params) if params else "",
     )
     session.add(s)
@@ -52,21 +52,24 @@ def test_rule_pack_includes_refined_params(session):
     assert "Rules for Mom" in pack["rules"]
 
 
-def test_active_strategies_matches_exact_class_only(session):
-    keep = _strategy(session, "ForexMom", "forex")
-    _strategy(session, "CryptoMom", "cripto", status="draft")
+def test_active_strategies_returns_all_active(session):
+    """The scanner reasons over EVERY approved strategy (asset-agnostic by
+    design); drafts are excluded."""
+    keep = _strategy(session, "ForexMom")
+    _strategy(session, "CryptoMom", status="draft")
+    _strategy(session, "GoldMom")
     from app.services.orchestrator import Orchestrator
 
-    matched = Orchestrator(session)._active_strategies(type("A", (), {
-        "asset_class": "forex", "timeframe_watchlist": "15m"})())
+    matched = Orchestrator(session)._active_strategies(type("A", (), {})())
     names = [s.name for s in matched]
     assert "ForexMom" in names
+    assert "GoldMom" in names
     assert "CryptoMom" not in names
     assert keep.status == "active"
 
 
 def test_run_scan_persists_concrete_refs(session, asset):
-    _strategy(session, "EUR Trend", "forex", params={"fast": 8, "slow": 34})
+    _strategy(session, "EUR Trend", params={"fast": 8, "slow": 34})
     from sqlmodel import select
 
     from app.services.orchestrator import Orchestrator
@@ -222,7 +225,7 @@ def test_run_scan_passes_references_to_scanner(session, asset):
     from app.services.orchestrator import Orchestrator
 
     _reference(session, "Sweep", "Liquidity sweep then displacement.")
-    _strategy(session, "EUR Breakout", "forex", params={"fast": 8, "slow": 34})
+    _strategy(session, "EUR Breakout", params={"fast": 8, "slow": 34})
 
     orch = Orchestrator(session)
     with patch.object(Orchestrator, "_market_ohlcv",
@@ -248,7 +251,7 @@ def test_validate_context_includes_references(session, asset):
     from app.services.orchestrator import Orchestrator
 
     _reference(session, "Sweep", "Liquidity sweep then displacement.")
-    _strategy(session, "EUR Breakout", "forex", params={"fast": 8, "slow": 34})
+    _strategy(session, "EUR Breakout", params={"fast": 8, "slow": 34})
 
     strategy = session.exec(select(Strategy).where(Strategy.status == "active")).first()
     scan = Scan(

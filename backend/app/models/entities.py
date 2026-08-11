@@ -39,13 +39,10 @@ class Strategy(SQLModel, table=True):
     name: str
     concept_markdown: str = ""  # general trading concept (ingested as context, preserved as-is)
     body_markdown: str  # entry criteria: concrete, executable entry/exit/risk basis
-    asset_class: str = ""
-    timeframe: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     embedding_id: str | None = None
     status: str = "active"  # active | draft | archived | failed
-    params_json: str = ""  # best backtest spec (JSON) applied on approval
-    strategy_code: str = ""  # AI-generated executable strategy code (faithful backtest)
+    params_json: str = ""  # proxy parameters (JSON) produced by synthesis for the scanner
     qa_notes: str = ""  # QA/rejection notes persisted for the user (edited on fix)
 
 
@@ -130,21 +127,6 @@ class LTRRecord(SQLModel, table=True):
     review: str = ""  # root-cause analysis + actionable lesson
     reviewed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     provider_used: str = ""
-
-
-class BacktestRun(SQLModel, table=True):
-    __tablename__ = "backtest_runs"
-
-    id: str = Field(primary_key=True)
-    strategy_id: str = Field(foreign_key="strategies.id")
-    symbol: str
-    timeframe: str
-    iteration: int = 0
-    spec_json: str
-    metrics_json: str  # {"train": {...}, "test": {...}}
-    rationale: str = ""
-    accepted: int = 1
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class Setting(SQLModel, table=True):

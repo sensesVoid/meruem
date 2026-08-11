@@ -92,6 +92,11 @@ REQUIREMENTS (QA-compliant, hard constraints):
 7. Keep it symbol-agnostic and timeframe-agnostic unless a reference states one.
 8. Do NOT copy any individual reference / retrieved concept wholesale; SYNTHESIZE the
    best setup by combining grounded ideas.
+9. PROXY PARAMETERS: also emit a top-level "params" object with the SMA fast/slow
+   periods and RSI/ATR periods the scanner uses to compute indicators at scan time
+   (defaults: fast 20, slow 50, rsi_period 14, atr_period 14). Keep them aligned with
+   the rules you write (e.g. "close above the 20-bar SMA" -> fast 20) and strictly
+   positive ints.
 
 IR COMPILER LAYER (IR.md): you must ALSO emit an intermediate-representation
 blueprint that maps your entry conditions to the ACTIVE MATHEMATICAL PRIMITIVE
@@ -140,6 +145,7 @@ Return STRICT JSON only:
   "approximations": ["what you approximated from OHLCV and how"],
   "grounded_on": ["short note of which RAG concept ids / presence of trader concept rules each part traces to"],
   "summary": "one sentence on the synthesized entry basis",
+  "params": {{"fast": <int>, "slow": <int>, "rsi_period": <int>, "atr_period": <int>}},
   "ir_blueprint": {{"rules": [{{"primitive": "...", "args": {{...}}}}]}},
   "new_primitives": [{{"name": "...", "description": "...",
     "parameters": {{...}}, "formula": "..."}}],
@@ -767,6 +773,7 @@ class SynthesizerAgent:
                     },
                     "new_primitives": [],
                     "new_primitive_errors": [],
+                    "params": self._normalize_params(None),
                     "ir": self._ir_offline(),
                 }
             # Reuse the saved references as the authoritative source when no concept
@@ -849,6 +856,7 @@ class SynthesizerAgent:
                 "grounding": grounding,
                 "new_primitives": new_primitives,
                 "new_primitive_errors": new_primitive_errors,
+                "params": self._normalize_params(data.get("params")),
                 "qa": self._merge_qa(entry, self_check, lenient=True,
                                       grounding=grounding),
             }
@@ -883,6 +891,7 @@ class SynthesizerAgent:
                 },
                 "new_primitives": [],
                 "new_primitive_errors": [],
+                "params": self._normalize_params(None),
                 "ir": self._ir_offline(),
                 "self_check": {
                     "verdict": "REVISE",
@@ -892,6 +901,36 @@ class SynthesizerAgent:
                 },
                 "qa": qa_heur,
             }
+
+    @staticmethod
+    def _normalize_params(raw: object) -> dict:
+        """Coerce the LLM's top-level ``params`` block into the scanner's proxy
+        parameters, clamped to sane ranges. Defaults mirror the orchestrator's
+        indicator engine so a missing/invalid block still yields a scan-ready spec.
+        """
+        if not isinstance(raw, dict):
+            raw = {}
+        params = {
+            "fast": 20,
+            "slow": 50,
+            "rsi_period": 14,
+            "atr_period": 14,
+        }
+        try:
+            fast = int(raw.get("fast", params["fast"]))
+            slow = int(raw.get("slow", params["slow"]))
+            if 2 <= fast <= 200 and 2 <= slow <= 400 and fast < slow:
+                params["fast"] = fast
+                params["slow"] = slow
+            rsi = int(raw.get("rsi_period", params["rsi_period"]))
+            if 2 <= rsi <= 60:
+                params["rsi_period"] = rsi
+            atr = int(raw.get("atr_period", params["atr_period"]))
+            if 2 <= atr <= 60:
+                params["atr_period"] = atr
+        except (TypeError, ValueError):
+            pass
+        return params
 
     @staticmethod
     def _normalize_self_check(raw: object) -> dict:

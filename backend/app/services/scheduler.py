@@ -76,28 +76,6 @@ def _run_ltr() -> None:
         print(f"[scheduler] LTR error: {exc}")
 
 
-def _run_ml_retrain() -> None:
-    """Weekly XGBoost ML scanner retrain.
-
-    Automatically retrains the classifier every 7 days using the latest
-    green-gate strategies + accepted BacktestRuns so the model stays current
-    as new strategies are added to the library.
-    """
-    from app.services.ml_scanner import train as ml_train
-
-    try:
-        with Session(engine) as session:
-            result = ml_train(session)
-        if result.get("ok"):
-            print(f"[scheduler] ML retrain: {result.get('n_samples')} samples, "
-                  f"train_acc={result.get('train_accuracy'):.3f}, "
-                  f"test_acc={result.get('test_accuracy'):.3f}")
-        else:
-            print(f"[scheduler] ML retrain skipped: {result.get('error')}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"[scheduler] ML retrain error: {exc}")
-
-
 def _load_persisted_scan_settings() -> tuple[int, bool]:
     """Read the user's persisted automation prefs (or defaults).
 
@@ -153,12 +131,6 @@ def start_scheduler() -> BackgroundScheduler:
         _run_ltr,
         trigger=IntervalTrigger(seconds=settings.ltr_check_interval_seconds),
         id="ltr_auto",
-        replace_existing=True,
-    )
-    _scheduler.add_job(
-        _run_ml_retrain,
-        trigger=IntervalTrigger(weeks=1),
-        id="ml_retrain_weekly",
         replace_existing=True,
     )
     _scheduler.start()

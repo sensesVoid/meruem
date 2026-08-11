@@ -110,77 +110,27 @@ def test_vault_roundtrip(client):
 def test_strategy_create_embeds(client):
     r = client.post("/api/strategies", json={
         "name": "VP Breakout v2", "body_markdown": "Buy on volume profile POC breakout with bullish imbalance.",
-        "asset_class": "cripto", "timeframe": "15m",
     })
     assert r.status_code == 200
 
 
-def test_approve_applies_best_refined_params(client):
+def test_approve_promotes_draft_to_active(client):
+    """Approval is a plain status flip: a DRAFT becomes ACTIVE, and approving an
+    already-active strategy is a no-op (no backtest gate, no metrics checks)."""
     strat = client.post("/api/strategies", json={
-        "name": "Refined Strat", "body_markdown": "Buy the trend. Stop at ATR.",
-        "asset_class": "forex", "timeframe": "15m",
+        "name": "Draft Strat", "body_markdown": "Buy the trend. Stop at ATR.",
+        "status": "draft",
     }).json()
     sid = strat["id"]
-
-    # Simulate a persisted accepted BacktestRun (refine already saved it).
-    from sqlmodel import Session
-
-    from app.core.db import engine
-    from app.models.entities import BacktestRun
-
-    with Session(engine) as session:
-        session.add(BacktestRun(
-            id="bt-approve-test", strategy_id=sid, symbol="EURUSD",
-            timeframe="15m", iteration=3,
-            spec_json='{"fast": 8, "slow": 34, "rsi_period": 11}',
-            metrics_json=('{"train": {"n_trades": 40, "win_rate": 55, "sharpe": 1.4, '
-                          '"max_drawdown": 8, "profit_factor": 1.3}, '
-                          '"test": {"n_trades": 30, "win_rate": 53, "sharpe": 1.2, '
-                          '"max_drawdown": 9, "profit_factor": 1.2}}'),
-            rationale="best", accepted=1,
-        ))
-        session.commit()
+    assert strat["status"] == "draft"
 
     r = client.post(f"/api/strategies/{sid}/approve")
     assert r.status_code == 200
     data = r.json()
     assert data["status"] == "active"
-    assert '"fast": 8' in data["params_json"]
 
-    # approve again must not error and keeps the applied spec
     again = client.post(f"/api/strategies/{sid}/approve").json()
-    assert again["params_json"] == data["params_json"]
-
-
-def test_approve_rejects_overfit_metrics(client):
-    strat = client.post("/api/strategies", json={
-        "name": "Overfit Strat", "body_markdown": "Buy the trend.",
-        "asset_class": "forex", "timeframe": "15m",
-    }).json()
-    sid = strat["id"]
-
-    from sqlmodel import Session
-
-    from app.core.db import engine
-    from app.models.entities import BacktestRun
-
-    # High in-sample but OOS not green -> the anti-overfit gate must refuse approval.
-    with Session(engine) as session:
-        session.add(BacktestRun(
-            id="bt-overfit-test", strategy_id=sid, symbol="EURUSD",
-            timeframe="15m", iteration=2,
-            spec_json='{"fast": 12, "slow": 40, "rsi_period": 14}',
-            metrics_json='{"train": {"n_trades": 40, "win_rate": 70, "sharpe": 2.5, '
-                          '"max_drawdown": 5, "profit_factor": 2.0}, '
-                          '"test": {"n_trades": 30, "win_rate": 45, "sharpe": 0.6, '
-                          '"max_drawdown": 20, "profit_factor": 0.9}}',
-            rationale="best", accepted=1,
-        ))
-        session.commit()
-
-    r = client.post(f"/api/strategies/{sid}/approve")
-    assert r.status_code == 409
-    assert "overfit" in r.json()["detail"].lower()
+    assert again["status"] == "active"
 
 
 def test_strategy_submit_starts_job(client):
@@ -220,9 +170,28 @@ def test_submit_requires_concept(client):
     assert "concept" in (state.get("message") or "").lower()
 
 
-def test_submit_retains_failed_strategy_for_edit(client):
+def test_submit_failed_qa_retains_strategy_for_edit(client, monkeypatch):
     """A synthesized strategy that FAILs QA is kept (status=failed) so it can be
     edited/discarded."""
+    from app.agents.synthesizer import SynthesizerAgent
+
+    def fake_synthesize(self, *a, **k):
+        return {
+            "entry_markdown": "1. Buy the momentum oscillator cross. 2. Stop at risk. 3. Target.",
+            "approximations": [],
+            "grounded_on": ["ref-1"],
+            "summary": "not machine-actionable",
+            "provider": "test",
+            "grounded": True,
+            "grounding": {"verdict": "GROUNDED", "score": 0.7, "source_count": 1,
+                          "ungrounded_rules": []},
+            "qa": {"verdict": "FAIL", "quality_score": 20, "contamination": False,
+                   "issues": ["no entry condition"], "provider": "test",
+                   "summary": "QA failed: not machine-actionable"},
+            "ir": {"status": "SUCCESS", "compiled_blueprint": {"rules": []}},
+        }
+
+    monkeypatch.setattr(SynthesizerAgent, "synthesize", fake_synthesize)
     r = client.post("/api/strategies/submit", json={
         "name": "Vague Rule",
         "concept_markdown": "Example only, trust me, insert your own rules here.",
@@ -230,7 +199,6 @@ def test_submit_retains_failed_strategy_for_edit(client):
     assert r.status_code == 200
     job_id = r.json()["job_id"]
 
-    # Poll until terminal state (QA is heuristic-fast when LLM offline).
     import time
 
     state = {}
@@ -302,16 +270,38 @@ def test_submit_ungrounded_synthesis_fails_loudly(client, monkeypatch):
     assert row.get("qa_notes"), "ungrounded failure should persist QA notes"
 
 
-def test_submit_backtest_failure_exposes_diagnostics(client, monkeypatch):
-    """When synthesis succeeds but backtest/refine fails, the job surfaces the
-    actual synthesized strategy, scores, recommendations and thinking trace at
-    stage 'optimize' so the UI can render a diagnostics panel."""
-    from app.services.backtest_engine import BacktestEngine
+def test_pipeline_failure_exposes_diagnostics(client, monkeypatch):
+    """When synthesis succeeds but a later pipeline step (finalize/RAG index)
+    fails, the job surfaces the actual synthesized strategy, proxy parameters,
+    recommendations and thinking trace at the stopping stage so the UI can
+    render a diagnostics panel."""
+    from app.agents.synthesizer import SynthesizerAgent
+    from app.services.rag import RagService
 
-    def boom(*a, **k):
-        raise ValueError("Only 3 candles available for EURUSD 1h")
+    def fake_synthesize(self, *a, **k):
+        return {
+            "entry_markdown": ("1. Buy when price reclaims the value area low. "
+                               "2. Stop below the recent swing low. "
+                               "3. Target the value area high."),
+            "approximations": [],
+            "grounded_on": ["ref-1"],
+            "summary": "ok",
+            "provider": "test",
+            "grounded": True,
+            "params": {"fast": 20, "slow": 50, "rsi_period": 14, "atr_period": 14},
+            "grounding": {"verdict": "GROUNDED", "score": 0.9, "source_count": 1,
+                          "ungrounded_rules": []},
+            "qa": {"verdict": "PASS_MARGINAL", "quality_score": 55,
+                   "contamination": False,
+                   "issues": ["no explicit take-profit"], "provider": "test"},
+            "ir": {"status": "SUCCESS", "compiled_blueprint": {"rules": []}},
+        }
 
-    monkeypatch.setattr(BacktestEngine, "refine_code_loop", boom)
+    def boom(self, *a, **k):
+        raise ValueError("RAG index unavailable")
+
+    monkeypatch.setattr(SynthesizerAgent, "synthesize", fake_synthesize)
+    monkeypatch.setattr(RagService, "index_strategy", boom)
     r = client.post("/api/strategies/submit", json={
         "name": "Diag Test",
         "concept_markdown": "Mean reversion on pullbacks to the value area.",
@@ -329,11 +319,13 @@ def test_submit_backtest_failure_exposes_diagnostics(client, monkeypatch):
         time.sleep(0.3)
 
     assert state["status"] == "error"
-    assert state.get("stage") == "optimize", (
-        "stage must show the backtest failed AFTER a successful synthesis")
+    assert state.get("stage") == "finalize", (
+        "stage must show the failure AFTER a successful synthesis")
     diag = state.get("diagnostics") or {}
     assert diag.get("synth", {}).get("entry_markdown"), (
         "diagnostics must include the synthesized entry criteria")
+    assert diag["synth"].get("params", {}).get("fast") == 20, (
+        "diagnostics must include the proxy params")
     assert diag.get("recommendations"), "diagnostics must include recommendations"
     assert diag.get("thinking"), "diagnostics must include the thinking trace"
     steps = {s.get("step") for s in diag["thinking"]}
@@ -341,59 +333,24 @@ def test_submit_backtest_failure_exposes_diagnostics(client, monkeypatch):
 
 
 def test_recommendations_derive_from_failure_mode():
-    """Recommendations are derived from the actual scores (offline-safe)."""
+    """Recommendations are derived from the actual QA failure mode
+    (offline-safe)."""
     from app.services.strategy_pipeline import _recommendations
 
-    recs = _recommendations(gate={
-        "n_trades_test": 2, "win_rate_test": 100, "sharpe_test": 3.0,
-        "sharpe_train": 0,
-    })
-    texts = " ".join(r["text"].lower() for r in recs)
-    assert "reference" in texts and "entry example" in texts
+    recs = _recommendations(qa={"verdict": "FAIL", "issues": []})
+    assert any(r["type"] == "concept" for r in recs)
 
-    weak = _recommendations(gate={
-        "n_trades_test": 30, "win_rate_test": 41.0, "sharpe_test": 0.6,
-        "sharpe_train": 0.5,
-    })
-    weak_texts = " ".join(r["text"].lower() for r in weak)
-    assert "win rate" in weak_texts or "sharpe" in weak_texts
+    issue_recs = _recommendations(
+        qa={"verdict": "PASS_MARGINAL", "issues": ["vague stop", "no target"]})
+    types = {r["type"] for r in issue_recs}
+    assert "qa" in types
+    assert any("vague stop" in r["text"] for r in issue_recs)
 
-    overfit = _recommendations(gate={
-        "n_trades_test": 30, "win_rate_test": 52.0, "sharpe_test": 0.8,
-        "sharpe_train": 2.5,
-    })
-    assert any(r["type"] == "overfit" for r in overfit)
+    err_recs = _recommendations(qa={"verdict": "FAIL"}, error="synthesis exploded")
+    assert any(r["type"] == "error" for r in err_recs)
 
-
-def test_metrics_green_guard():
-    from app.services.strategy_pipeline import _metrics_green, _metrics_overfit_guard
-
-    # Strong OOS -> green even if train is more conservative.
-    gate = _metrics_overfit_guard({
-        "train": {"n_trades": 40, "win_rate": 40, "sharpe": 0.5,
-                  "max_drawdown": 8, "profit_factor": 1.05},
-        "test": {"n_trades": 30, "win_rate": 53, "sharpe": 1.4,
-                 "max_drawdown": 6, "profit_factor": 1.5},
-    })
-    assert _metrics_green(gate) is True
-
-    # OOS collapses vs train -> clear overfitting -> reject.
-    overfit = _metrics_overfit_guard({
-        "train": {"n_trades": 40, "win_rate": 75, "sharpe": 3.1,
-                  "max_drawdown": 4, "profit_factor": 2.4},
-        "test": {"n_trades": 30, "win_rate": 45, "sharpe": 0.7,
-                 "max_drawdown": 18, "profit_factor": 0.8},
-    })
-    assert _metrics_green(overfit) is False
-
-    # OOS sharpe below 1.0 on its own -> reject regardless of train.
-    low_sharpe = _metrics_overfit_guard({
-        "train": {"n_trades": 40, "win_rate": 55, "sharpe": 0.9,
-                  "max_drawdown": 10, "profit_factor": 1.1},
-        "test": {"n_trades": 30, "win_rate": 52, "sharpe": 0.8,
-                 "max_drawdown": 11, "profit_factor": 1.0},
-    })
-    assert _metrics_green(low_sharpe) is False
+    # A PASS verdict needs no recommendations at all.
+    assert _recommendations(qa={"verdict": "PASS"}) == []
 
 
 def test_risk_check(client):

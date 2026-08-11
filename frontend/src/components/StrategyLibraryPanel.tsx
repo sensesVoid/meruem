@@ -1,56 +1,19 @@
 import { useEffect, useState } from "react";
 import { api, Asset, Strategy, StrategyPipelineJob } from "@/lib/api";
+import {
+  setFinalizeHandler,
+  startPoll,
+  stopPoll,
+  subscribeJob,
+} from "@/lib/pipelineJob";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input, Select, Textarea } from "@/components/ui/input";
-import { BacktestPanel } from "@/components/BacktestPanel";
 import { SynthesisDiagnostics } from "@/components/SynthesisDiagnostics";
+import { MLArtifactUpload } from "@/components/MLArtifactUpload";
 
 const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1D", "1W", "1M"];
-
-type Gate = NonNullable<StrategyPipelineJob["gate"]>;
-
-function gateInsights(gate: Gate, green: boolean): string[] {
-  const lines: string[] = [];
-  const oos = (check: boolean, ok: string, bad: string) =>
-    lines.push(check ? `✓ ${ok}` : `✗ ${bad}`);
-  oos(gate.n_trades_test >= 5, `${gate.n_trades_test} OOS trades (min 5)`, `${gate.n_trades_test} OOS trades (min 5)`);
-  oos(gate.win_rate_test >= 50, `OOS win rate ${gate.win_rate_test.toFixed(1)}% (≥50)`, `OOS win rate ${gate.win_rate_test.toFixed(1)}% (<50)`);
-  oos(gate.sharpe_test >= 1.0, `OOS Sharpe ${gate.sharpe_test.toFixed(2)} (≥1.0)`, `OOS Sharpe ${gate.sharpe_test.toFixed(2)} (<1.0)`);
-  const overfit =
-    gate.sharpe_train > 0 && gate.sharpe_test < gate.sharpe_train * 0.65 && gate.sharpe_test < 1.0;
-  oos(
-    !overfit,
-    "No overfit: OOS holds up vs train",
-    `Overfit: OOS Sharpe ${gate.sharpe_test.toFixed(2)} collapses vs train ${gate.sharpe_train.toFixed(2)}`,
-  );
-  if (green) {
-    lines.push("All OOS metrics green — approved as ACTIVE.");
-  } else {
-    lines.push(
-      `Train vs OOS Sharpe: ${gate.sharpe_train.toFixed(2)} in-sample → ${gate.sharpe_test.toFixed(2)} out-of-sample.`,
-    );
-  }
-  return lines;
-}
-
-function GateInsightPanel({ gate, green }: { gate: Gate; green: boolean }) {
-  return (
-    <div className="mt-1.5 rounded border border-meruem-border bg-meruem-bg p-1.5 text-[10px]">
-      <p className={`font-medium ${green ? "text-meruem-green" : "text-meruem-gold"}`}>
-        Approval gate: {green ? "ALL GREEN" : "NOT ALL GREEN"}
-      </p>
-      <div className="mt-1 space-y-0.5">
-        {gateInsights(gate, green).map((line, i) => (
-          <p key={i} className="text-meruem-muted">
-            {line}
-          </p>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 const CONCEPT_TEMPLATE = `Concepts / Thesis:
   Trade the buy-side liquidity sweep that leaves a fair value gap, in the direction of the higher-timeframe trend.
@@ -79,24 +42,23 @@ const STATUS_TONE: Record<string, "green" | "gold" | "blue" | "red" | "neutral">
   reference: "blue",
 };
 
-const PIPELINE_STEPS = ["Synthesis", "Backtest", "Refine", "Gate"] as const;
+const PIPELINE_STEPS = ["Synthesis", "QA", "Finalize"] as const;
 
 function stepStates(job: StrategyPipelineJob): ("done" | "active" | "pending" | "error")[] {
   const stage = job.stage ?? "";
   if (job.status === "error") {
     // QA gate failure surfaces as a FAIL on the merged gate; everything before the
     // failing step is done, the failing step is red, the rest untouched.
-    const failedIdx = stage === "synth" ? 0 : stage === "optimize" ? 1 : stage === "qa" ? 3 : 1;
+    const failedIdx = stage === "synth" ? 0 : stage === "qa" ? 1 : 2;
     return PIPELINE_STEPS.map((_, i) =>
       i < failedIdx ? "done" : i === failedIdx ? "error" : "pending",
     );
   }
   if (job.status === "queued") return PIPELINE_STEPS.map(() => "pending");
-  // optimize spans the faithful backtest + refinement loop.
-  if (stage === "synth") return ["active", "pending", "pending", "pending"];
-  if (stage === "optimize") return ["done", "active", "active", "pending"];
-  if (stage === "finalize") return ["done", "done", "done", "active"];
-  return ["done", "done", "done", "done"];
+  if (stage === "synth") return ["active", "pending", "pending"];
+  if (stage === "qa") return ["done", "active", "pending"];
+  if (stage === "finalize") return ["done", "done", "active"];
+  return ["done", "done", "done"];
 }
 
 function PipelineSteps({ job }: { job: StrategyPipelineJob }) {
@@ -131,20 +93,16 @@ export function StrategyLibraryPanel() {
   const [body, setBody] = useState("");
   const [savedId, setSavedId] = useState<string | null>(null);
   const [job, setJob] = useState<StrategyPipelineJob | null>(null);
-  const [backtestId, setBacktestId] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editConcept, setEditConcept] = useState("");
   const [editBody, setEditBody] = useState("");
-  const [viewingCode, setViewingCode] = useState<string | null>(null);
-  const [pollRef, setPollRef] = useState<number | null>(null);
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
   const [assets, setAssets] = useState<Asset[]>([]);
   const [symbol, setSymbol] = useState("EURUSD");
   const [tf, setTf] = useState("5m");
-  const [bars, setBars] = useState(6000);
-  const running = pollRef !== null;
 
   const clearForm = () => {
     setName("");
@@ -172,11 +130,33 @@ export function StrategyLibraryPanel() {
       setAssets(list);
     }).catch(() => {});
   }, []);
+  // Polling lives at module scope so synthesis keeps running (and is re-observable)
+  // when the user switches tabs. Subscribe here to mirror the active job into state;
+  // give the module a live finalize hook so the form clears + list refreshes exactly
+  // when the job finishes while this panel is mounted.
   useEffect(() => {
-    return () => {
-      if (pollRef !== null) window.clearInterval(pollRef);
-    };
-  }, [pollRef]);
+    const unsub = subscribeJob((s) => {
+      setJob(s);
+      setRunning(s !== null && s.status !== "done" && s.status !== "error");
+      if (s && (s.status === "done" || (s.status === "error" && s.strategy_id))) {
+        setSavedId(s.strategy_id ?? null);
+      }
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    setFinalizeHandler((s) => {
+      if (s.status === "done" || (s.status === "error" && s.strategy_id)) {
+        setSavedId(s.strategy_id ?? null);
+        clearForm();
+        load();
+      }
+      // Plain error (no strategy persisted): keep the user's input so it can
+      // be fixed and resubmitted — handled by the commit above not firing.
+    });
+    return () => setFinalizeHandler(null);
+  }, []);
 
   const submit = async (strategyId?: string) => {
     const hasReferences = strategies.some((s) => s.status === "reference");
@@ -201,40 +181,15 @@ export function StrategyLibraryPanel() {
         strategy_id: strategyId ?? null,
         symbol,
         timeframe: tf,
-        bars,
       });
-      const interval = window.setInterval(async () => {
-        try {
-          const s = await api.get<StrategyPipelineJob>(`/strategies/submit/${job_id}`);
-          setJob(s);
-          if (s.status === "done" || (s.status === "error" && s.strategy_id)) {
-            window.clearInterval(interval);
-            setPollRef(null);
-            setSavedId(s.strategy_id ?? null);
-            clearForm();
-            await load();
-          } else if (s.status === "error") {
-            // The strategy was never persisted — keep the user's input so it
-            // can be fixed and resubmitted.
-            window.clearInterval(interval);
-            setPollRef(null);
-          }
-        } catch {
-          window.clearInterval(interval);
-          setPollRef(null);
-        }
-      }, 1500);
-      setPollRef(interval);
+      startPoll(job_id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   };
 
   const stopPolling = () => {
-    if (pollRef !== null) {
-      window.clearInterval(pollRef);
-      setPollRef(null);
-    }
+    stopPoll();
     setJob(null);
   };
 
@@ -301,7 +256,7 @@ export function StrategyLibraryPanel() {
     setSavedId(null);
     try {
       await api.post("/strategies/reference", { name, concept_markdown: concept });
-      setInfo("Saved as a reference document. References are combined by the Synthesizer when you click Synthesize & Optimize.");
+      setInfo("Saved as a reference document. References are combined by the Synthesizer when you click Synthesize & QA.");
       clearForm();
       await load();
     } catch (e) {
@@ -319,17 +274,13 @@ export function StrategyLibraryPanel() {
             size="sm"
             variant="outline"
             onClick={saveReference}
-            title="Save the concept as a REFERENCE doc in the library (not backtested yet); synthesis combines references into one entry"
+            title="Save the concept as a REFERENCE doc in the library; synthesis combines references into one entry"
           >
             Save Reference
           </Button>
-          {running ? (
+          {running && (
             <Button size="sm" variant="outline" onClick={stopPolling}>
               Stop
-            </Button>
-          ) : (
-            <Button size="sm" onClick={() => { setEditing(null); submit(); }}>
-              Synthesize &amp; Optimize
             </Button>
           )}
         </div>
@@ -339,17 +290,13 @@ export function StrategyLibraryPanel() {
           <div className="mb-3 space-y-1.5 rounded-md border border-meruem-border p-2">
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Strategy name" />
             <div className="flex flex-wrap items-end gap-1.5">
-              <Select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="w-24" title="Symbol the synthesized strategy is backtested on">
+              <Select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="w-24" title="Symbol hint for synthesis (entry criteria are kept symbol-agnostic)">
                 {assets.map((a) => <option key={a.id} value={a.symbol}>{a.symbol}</option>)}
                 {assets.length === 0 && <option value="EURUSD">EURUSD</option>}
               </Select>
-              <Select value={tf} onChange={(e) => setTf(e.target.value)} className="w-20" title="Timeframe the synthesized strategy is backtested on">
+              <Select value={tf} onChange={(e) => setTf(e.target.value)} className="w-20" title="Timeframe hint for synthesis">
                 {TIMEFRAMES.map((t) => <option key={t} value={t}>{t}</option>)}
               </Select>
-              <div className="flex items-center gap-1">
-                <span className="text-[10px] text-meruem-muted">bars</span>
-                <Input type="number" value={bars} min={100} onChange={(e) => setBars(Number(e.target.value))} className="w-20" />
-              </div>
             </div>
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-meruem-muted">Trading concept</p>
@@ -371,20 +318,20 @@ export function StrategyLibraryPanel() {
             />
         <p className="text-[11px] text-meruem-muted">
           The trading concept is a REFERENCE document — save it first, then
-          <span className="text-meruem-accent"> Synthesize &amp; Optimize</span> compiles all saved
+          <span className="text-meruem-accent"> Synthesize &amp; QA</span> compiles all saved
           references (plus the RAG library) into ONE exact, executable entry criteria. Price-action
           mechanics (ICT: liquidity sweeps, FVG/imbalance, CHOCH/MSS, retests) and order-flow
           approximations are honored; synthesis builds the machine-actionable trade from the concepts
-          (no concept is rejected for being conceptual). It is then backtested faithfully, refined, and
-          approved only when all metrics are green.
+          (no concept is rejected for being conceptual). The merged QA gate verdict comes from the
+          synthesis call chain itself — no backtest — and a PASS + grounded entry activates it.
         </p>
       </div>
 
       {savedId && !running && (
         <p className="mb-2 rounded border border-meruem-green/40 bg-meruem-green/10 p-2 text-xs text-meruem-green">
-          Strategy saved! QA passed and the best refined setup was applied (
+          Strategy saved! (
           {strategies.find((s) => s.id === savedId)?.status ??
-            (job?.green ? "active — all metrics green" : "draft — not all metrics green")}
+            (job?.status === "done" ? "see status below" : "see status below")}
           ).
         </p>
       )}
@@ -405,15 +352,13 @@ export function StrategyLibraryPanel() {
           </div>
           <p className="mt-1 text-[11px] text-meruem-text">{job.message || "Working…"}</p>
           <PipelineSteps job={job} />
-          {job.status === "done" && job.faithful && (
+          {job.status === "done" && (
             <p className="mt-1 text-[10px] text-meruem-accent">
-              Backtested with AI-generated executable strategy code (faithful to your rules)
+              {job.grounded ? "Entry grounded on the ingested concepts — QA verdict: " : ""}
+              {job.diagnostics?.synth?.qa?.verdict ?? "see diagnostics"}
             </p>
           )}
-          {job.status === "done" && job.gate && typeof job.green === "boolean" && (
-            <GateInsightPanel gate={job.gate} green={job.green} />
-          )}
-          {job.diagnostics && (job.status === "done" || job.stage === "optimize") && (
+          {job.diagnostics && (job.status === "done" || job.status === "error") && (
             <SynthesisDiagnostics
               diagnostics={job.diagnostics}
               failed={job.status === "error"}
@@ -436,6 +381,27 @@ export function StrategyLibraryPanel() {
         <p className="mb-2 rounded border border-meruem-red/40 bg-meruem-red/10 p-2 text-xs text-meruem-red">{error}</p>
       )}
 
+      <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-meruem-accent/40 bg-meruem-accent/5 p-2">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-meruem-accent">
+            Synthesize saved references
+          </p>
+          <p className="text-[10px] text-meruem-muted">
+            Compiles all saved reference documents (plus the RAG library) into one
+            executable strategy and runs the merged QA gate on it.
+          </p>
+        </div>
+        {running ? (
+          <Button size="sm" variant="outline" onClick={stopPolling}>
+            Stop
+          </Button>
+        ) : (
+          <Button size="sm" onClick={() => { setEditing(null); submit(); }}>
+            Synthesize &amp; QA
+          </Button>
+        )}
+      </div>
+
       <div className="max-h-[380px] space-y-1.5 overflow-y-auto">
         {strategies.map((s) => (
           <div key={s.id} className="rounded-md border border-meruem-border bg-meruem-bg p-2">
@@ -444,7 +410,7 @@ export function StrategyLibraryPanel() {
               <div className="flex items-center gap-1.5">
                 <Badge tone={STATUS_TONE[s.status] ?? "gold"}>{s.status}</Badge>
                 {s.status === "reference" ? (
-                  <Button size="sm" variant="outline" onClick={() => resubmitExisting(s)} title="Compile this reference (with all saved references) into a machine-actionable entry + optimize">
+                  <Button size="sm" variant="outline" onClick={() => resubmitExisting(s)} title="Compile this reference (with all saved references) into a machine-actionable entry">
                     Synthesize
                   </Button>
                 ) : (
@@ -461,16 +427,6 @@ export function StrategyLibraryPanel() {
                     )}
                   </>
                 )}
-                {s.status !== "reference" && s.strategy_code && (
-                  <Button size="sm" variant="outline" onClick={() => setViewingCode(viewingCode === s.id ? null : s.id)} title="View the AI-generated executable strategy code">
-                    {viewingCode === s.id ? "Close code" : "Code"}
-                  </Button>
-                )}
-                {s.status !== "reference" && (
-                  <Button size="sm" variant="outline" onClick={() => setBacktestId(backtestId === s.id ? null : s.id)}>
-                    {backtestId === s.id ? "Close" : "Backtest"}
-                  </Button>
-                )}
                 <button className="text-meruem-red" onClick={() => remove(s.id)}>x</button>
               </div>
             </div>
@@ -479,23 +435,12 @@ export function StrategyLibraryPanel() {
               <p className="mt-1 line-clamp-1 text-[10px] text-meruem-accent">Concept: {s.concept_markdown}</p>
             )}
             <p className="mt-1 text-[10px] text-meruem-muted">
-              {s.asset_class} · {s.timeframe} · {s.created_at?.slice(0, 10)}
+              {s.created_at?.slice(0, 10)}
             </p>
             {s.status === "failed" && s.qa_notes && (
               <p className="mt-1 rounded bg-meruem-red/10 p-1.5 text-[10px] text-meruem-red">
                 QA: {s.qa_notes}
               </p>
-            )}
-            {s.strategy_code ? (
-              <p className="mt-1 text-[10px] text-meruem-accent">✓ Faithful Strategy Code generated</p>
-            ) : s.status === "active" ? (
-              <p className="mt-1 text-[10px] text-meruem-muted">Strategy code pending backtest generation</p>
-            ) : null}
-
-            {viewingCode === s.id && s.strategy_code && (
-              <pre className="mt-1.5 max-h-64 overflow-auto rounded border border-meruem-border bg-meruem-bg p-2 text-[10px] text-meruem-text">
-                {s.strategy_code}
-              </pre>
             )}
 
             {editing === s.id ? (
@@ -517,7 +462,7 @@ export function StrategyLibraryPanel() {
                 <div className="flex gap-1.5">
                   <Button size="sm" variant="success" onClick={() => saveEdit(s)}>Save</Button>
                   <Button size="sm" variant="outline" onClick={() => setEditing(null)}>Cancel</Button>
-                  <Button size="sm" variant="outline" onClick={() => resubmitExisting(s)} title="Re-run QA + optimize with this body">
+                  <Button size="sm" variant="outline" onClick={() => resubmitExisting(s)} title="Re-run synthesis + QA with this body">
                     Resubmit
                   </Button>
                 </div>
@@ -536,15 +481,7 @@ export function StrategyLibraryPanel() {
         )}
       </div>
 
-      {backtestId && (
-        <div className="mt-2">
-          {strategies.find((s) => s.id === backtestId) ? (
-            <BacktestPanel strategy={strategies.find((s) => s.id === backtestId)!} />
-          ) : (
-            <p className="text-xs text-meruem-muted">Strategy removed.</p>
-          )}
-        </div>
-      )}
+      <MLArtifactUpload />
       </>
     </Card>
   );

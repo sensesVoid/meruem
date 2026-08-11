@@ -2,18 +2,19 @@
 
 Local-first automated trading terminal: a Tauri desktop shell wrapping a React + Vite frontend and a FastAPI sidecar, driven by a multi-agent AI pipeline.
 
-The workflow is concept-in, trades-out: ingest trading concepts → synthesize executable entry strategies strictly grounded in them → QA, backtest and refine against extracted historical data → scan a watchlist for live setups → AI-validate every signal → block unsafe trades with live risk interception → copy accepted trades from a master account to slave accounts across MT5 / Binance / MEXC.
+The workflow is concept-in, trades-out: ingest trading concepts → synthesize executable entry strategies strictly grounded in them → pass a merged QA gate (deterministic + LLM self-check) → scan a watchlist for live setups → AI-validate every signal → block unsafe trades with live risk interception → copy accepted trades from a master account to slave accounts across MT5 / Binance / MEXC.
 
 > Feature roadmap and phase status live in `Pending.md`.
 
 ## Highlights
 
-- **Concept → Strategy pipeline** — save a trading concept (e.g. *"liquidity sweep into a Fair Value Gap with a Change in State of Delivery"*) and the Synthesizer agent compiles it into a concrete entry model grounded in the ingested material. A merged QA gate (deterministic + LLM self-check), a faithful code backtest with a Monte Carlo benchmark, and a refinement loop converge on the best parameterization before you approve it.
+- **Concept → Strategy pipeline** — save a trading concept (e.g. *"liquidity sweep into a Fair Value Gap with a Change in State of Delivery"*) and the Synthesizer agent compiles it into a concrete entry model grounded in the ingested material. The merged QA gate (deterministic + LLM self-check) decides PASS / FAIL, and the pipeline also emits **proxy parameters** (fast/slow/RSI/ATR periods) that the scanner reads to compute real indicators at scan time.
+- **Raw-LLM scanner** — the watchlist scanner reasons over every approved strategy's rules + proxy params plus the reference library and any attached ML artifact context files, producing setups from real computed indicators.
 - **IR primitive registry** — entry rules are expressed with math-checkable primitives (FVG, VWAP, volume profile, etc.) rather than free text. New tools can be proposed and registered at runtime; the registry hot-swaps for the running process.
 - **Live risk interception** — every auto trade passes a risk gate (concurrent-trade cap, daily hard-loss cap, total drawdown ceiling, news-block windows) before it ever reaches a broker.
 - **Master–slave copier** — fan-out with proportional / fixed / risk-% lot scaling, and a position manager with auto-breakeven and ratcheting trailing stops rendered live on the chart (entry/SL/TP overlay lines with hover tooltips).
 - **Universal broker connector** — one protocol (`BrokerAdapter`) implemented for MT5 (native), Binance and MEXC (via `ccxt`); adding a new broker is a single registry entry with zero call-site changes.
-- **ML scanner** — extract parquet datasets for watchlist symbols over exact date windows and train a signal model; strategy backtests prefer the extracted history over live fetch.
+- **ML context files** — reference documents (`.txt`/`.md`/`.json`/`.csv`) can be uploaded per symbol and are passed to the scanner as read-only context, without any model training.
 - **Local-first** — everything runs on your machine; API secrets live in the OS keyring, and the SQLite database never leaves your disk.
 
 ## Stack
@@ -24,11 +25,10 @@ The workflow is concept-in, trades-out: ingest trading concepts → synthesize e
 | Frontend | React 18 + TypeScript + Tailwind CSS + Vite |
 | Charting | `lightweight-charts` (TradingView MIT) |
 | Backend | FastAPI + Uvicorn sidecar on `127.0.0.1:8765` |
-| Database | SQLite via SQLModel (9 tables) |
+| Database | SQLite via SQLModel (8 tables) |
 | AI | Local Ollama scanner → configurable cloud validator chain (Gemini → Groq → DeepSeek → Ollama) |
 | RAG | ChromaDB + `sentence-transformers` (keyword-search fallback without ChromaDB) |
 | Brokers | `MetaTrader5` (native), `ccxt` (Binance, MEXC) |
-| ML | `xgboost` signal model trained on extracted parquet history (`pyarrow`) |
 | Credentials | OS `keyring` |
 | Scheduler | APScheduler (periodic scans, LTR review, data cleanup) |
 
@@ -38,13 +38,13 @@ The workflow is concept-in, trades-out: ingest trading concepts → synthesize e
 backend/
   app/
     core/        config (env vars), db (SQLModel engine + migrations)
-    models/      entities.py (9 SQL tables)
-    agents/      scanner, validator chain, synthesizer, strategy_codegen,
-                 refinement, LTR agent, xgb_scanner, universal LLM client
+    models/      entities.py (8 SQL tables)
+    agents/      scanner, validator chain, synthesizer, LTR agent,
+                 universal LLM client
     services/    broker_base/adapters/mexc, copier, position_manager,
                  risk_interceptor, risk_manager, strategy_pipeline, ir (+primitives),
-                 backtest_engine, dataset_service, ml_scanner, market_data,
-                 rag, news (+agent), regime, scheduler, orchestrator, vault, ...
+                 ml_artifact, market_data, rag, news (+agent), regime, scheduler,
+                 orchestrator, vault, ...
     api/         FastAPI REST router (prefix /api)
   scripts/       poc_faithful_orderflow.py, bench_refactor.py (perf harness)
   tests/         pytest integration suite
@@ -113,8 +113,7 @@ Open http://localhost:1420 in a browser. If the top bar shows `BACKEND OFFLINE`,
 | **Trades** | Position manager: open/closed trades, managed SL projection, close/delete, phantom-trade cleanup |
 | **Brokers** | Connect MT5 / Binance / MEXC accounts, designate master/slave, live connection status, keyring-backed credentials |
 | **Risk Settings** | Risk caps (concurrent trades, daily loss, drawdown ceiling), news-block window, auto-execution toggles |
-| **Strategies** | Strategy library + synthesis: ingest concepts, run the pipeline (QA → backtest/refine → approve), view diagnostics, Monte Carlo scores, and the generated strategy |
-| **ML Scanner** | Extract parquet datasets for watchlist symbols over exact date ranges, view extraction coverage, train/evaluate the XGBoost signal model |
+| **Strategies** | Strategy library + synthesis: ingest concepts, run the pipeline (Synthesis → QA → finalize), view the QA gate verdict, proxy parameters, diagnostics and the synthesized entry |
 | **Vault** | API keys for LLM providers + per-agent model assignment (locked fields with explicit save) |
 
 Desktop shell (once Rust is installed):
@@ -148,13 +147,11 @@ Secrets (broker passwords, API keys) are stored in the **OS keyring** via the Va
 - **Brokers & accounts** — `POST /brokers/connect|test`, `GET /brokers/status`, `GET|POST|PUT|DELETE /accounts`, `GET /accounts/equity`, `POST /copier/plan`
 - **Performance** — `GET /dashboard` (equity curve + per-account stats)
 - **Watchlist** — `GET|POST /assets`, `DELETE /assets/{id}`
-- **Strategies** — CRUD, `POST /strategies/reference`, `POST /strategies/qa`, `POST /strategies/submit` (+ job status), `POST /strategies/{id}/approve|review`, `POST /strategies/search`, `POST /strategies/ltr`, `GET /strategies/ltr/records`, `GET|POST /strategies/primitives`
-- **Backtests** — `POST /strategies/{id}/backtest`, `POST /strategies/{id}/backtest/refine`, `GET /strategies/{id}/backtests`
+- **Strategies** — CRUD, `POST /strategies/reference`, `POST /strategies/qa`, `POST /strategies/submit` (+ job status), `POST /strategies/{id}/approve|review`, `POST /strategies/search`, `POST /strategies/ltr`, `GET /strategies/ltr/records`, `GET|POST /strategies/primitives`, `GET|POST /strategies/ml-artifacts`, `GET|DELETE /strategies/ml-artifacts/{id}`
 - **Signals** — `GET /signals`, `POST /signals/scan`, `GET|POST /signals/automation`, `POST /signals/{scan_id}/accept`
 - **Scans / validations / trades** — `GET /scans`, `GET /validations`, `GET|POST /trades`, `PUT /trades/{id}/close`, `DELETE /trades/{id}`, `POST /trades/clear-phantoms`, `GET /chart/positions`
 - **Risk** — `GET /risk/check`, `GET /risk/plan`, `POST /risk/clear`
 - **Market data & news** — `GET /candles`, `GET /news`, `GET /news-agent/state`, `POST /news-agent/refresh`, `GET /regime`, `POST /regime/refresh`
-- **Datasets & ML** — `GET|POST /datasets`, `GET|DELETE /datasets/{id}`, `POST /datasets/extract`, `GET /ml/status`, `POST /ml/train`, `DELETE /ml/model`
 - **Maintenance** — `POST /cleanup/run`
 
 ## Risk guardrails (user-configurable, enforced live)
@@ -174,7 +171,7 @@ Gemini → Groq → DeepSeek → local Ollama → **`PAUSED_LLM_LIMIT`** (log to
 ```powershell
 .\.venv\Scripts\activate
 cd backend
-python -m pytest tests/ -q          # 235 tests: agents, API, brokers, copier, risk, backtests, datasets, ML, ...
+python -m pytest tests/ -q          # 201 tests: agents, API, brokers, copier, risk, strategy pipeline, IR, ...
 python scripts/bench_refactor.py    # dashboard + signals N+1→grouped performance benchmark
 ```
 

@@ -144,6 +144,7 @@ export interface VaultSlot {
   namespace: string;
   username: string;
   configured: boolean;
+  redacted?: string;
 }
 
 export interface LLMProvider {
@@ -284,13 +285,10 @@ export interface Strategy {
   name: string;
   concept_markdown?: string;
   body_markdown: string;
-  asset_class: string;
-  timeframe: string;
   status: string;
   created_at: string;
   params_json?: string;
   qa_notes?: string;
-  strategy_code?: string;
 }
 
 export function parseStrategyParams(s: Strategy): Record<string, number> | null {
@@ -342,16 +340,6 @@ export interface PipelineRecommendation {
   text: string;
 }
 
-export interface PipelineScores {
-  iterations: {
-    iteration: number;
-    accepted: boolean;
-    rationale: string;
-    train: BacktestMetrics;
-    test: BacktestMetrics;
-  }[];
-}
-
 export interface PipelineDiagnostics {
   synth: {
     concept?: string;
@@ -360,6 +348,7 @@ export interface PipelineDiagnostics {
     approximations?: string[];
     grounded_on?: string[];
     summary?: string;
+    params?: Record<string, number>;
     self_check?: {
       verdict: string;
       quality_score: number;
@@ -389,7 +378,6 @@ export interface PipelineDiagnostics {
     new_primitive_errors?: string[];
     rag_docs?: string[];
   };
-  scores?: PipelineScores | null;
   recommendations?: PipelineRecommendation[];
   thinking?: PipelineThinkingStep[];
 }
@@ -400,22 +388,21 @@ export interface StrategyPipelineJob {
   progress?: number;
   message?: string;
   strategy_id?: string;
-  green?: boolean;
-  faithful?: boolean;
   error?: string;
-  spec?: Record<string, number>;
-  gate?: {
-    n_trades_train: number;
-    n_trades_test: number;
-    win_rate_train: number;
-    win_rate_test: number;
-    sharpe_train: number;
-    sharpe_test: number;
-    max_drawdown_train: number;
-    max_drawdown_test: number;
-    profit_factor_train: number;
-    profit_factor_test: number;
-  };
+  params?: Record<string, number>;
+  grounded?: boolean;
+  grounding?: {
+    score: number;
+    verdict: string;
+    ungrounded_rules: string[];
+    source_count: number;
+  } | null;
+  ir?: {
+    status?: string;
+    errors?: string[];
+    blueprint_attempts?: number;
+    compiled_blueprint?: { rules: unknown[] } | null;
+  } | null;
   diagnostics?: PipelineDiagnostics;
 }
 
@@ -476,108 +463,6 @@ export interface Validation {
   rationale: string;
   suggested_levels_json: string;
   provider_used: string;
-}
-
-export interface McSharpe {
-  p5: number;
-  median: number;
-  p95: number;
-  n: number;
-}
-
-export interface BacktestMetrics {
-  n_trades: number;
-  win_rate: number;
-  sharpe: number;
-  max_drawdown: number;
-  return_pct: number;
-  profit_factor: number;
-  max_win: number;
-  max_loss: number;
-  avg_trade_pct: number;
-  mc_sharpe: McSharpe;
-  mc_costs?: {
-    spread_bps: number;
-    slippage_bps: number;
-    sharpe_p5: number;
-    sharpe_median: number;
-    sharpe_p95: number;
-    ret_p5: number;
-    ret_median: number;
-    ret_p95: number;
-    n: number;
-  };
-}
-
-export interface EquityPoint {
-  t: number;
-  equity: number;
-  dd: number;
-}
-
-export interface BacktestTrade {
-  size: number;
-  entry_price: number;
-  exit_price: number;
-  pnl: number;
-  ret_pct: number;
-  entry_time?: string;
-  exit_time?: string;
-  duration?: string;
-}
-
-export interface BacktestResult {
-  symbol: string;
-  timeframe: string;
-  bars: number;
-  provider: string;
-  spec: Record<string, number>;
-  metrics: BacktestMetrics;
-  equity_curve: EquityPoint[];
-  trades: BacktestTrade[];
-  status: string;
-  faithful?: boolean;
-}
-
-export interface BacktestIteration {
-  iteration: number;
-  accepted: boolean;
-  spec: Record<string, number>;
-  train: BacktestMetrics;
-  test: BacktestMetrics;
-  rationale: string;
-  next_rationale?: string;
-  predicted_improvement?: string;
-}
-
-export interface RefineResult {
-  strategy_id: string;
-  symbol: string;
-  timeframe: string;
-  bars: number;
-  split: { train: number; test: number };
-  provider: string;
-  status: string;
-  faithful?: boolean;
-  best: {
-    iteration: number;
-    spec: Record<string, number>;
-    train: BacktestMetrics;
-    test: BacktestMetrics;
-  } | null;
-  iterations: BacktestIteration[];
-}
-
-export interface BacktestHistoryItem {
-  id: string;
-  iteration: number;
-  symbol: string;
-  timeframe: string;
-  spec: Record<string, number>;
-  metrics: { train: BacktestMetrics; test: BacktestMetrics };
-  rationale: string;
-  accepted: boolean;
-  created_at: string;
 }
 
 export interface RegimeRead {
@@ -726,73 +611,44 @@ export interface RiskClearanceResult {
   };
 }
 
-export interface DatasetWarn {
-  provider: string;
-  ok: boolean;
-  error: string;
-}
-
-export interface DatasetItem {
+export interface MLArtifact {
   id: string;
-  symbol: string;
-  timeframe: string;
-  bar_count: number;
-  start_time: string;
-  end_time: string;
-  file_size_bytes: number;
-  file_size_mb: number;
-  file_path: string;
-  provider?: string;
-  warnings?: DatasetWarn[];
-  updated_at: string;
+  filename: string;
+  symbol?: string | null;
+  size: number;
+  created_at?: number;
+  preview?: string;
 }
 
-export interface DatasetExtractError {
-  symbol: string;
-  error: string;
+export interface MLArtifactUploadInput {
+  filename: string;
+  symbol?: string | null;
+  content: string;
 }
 
-export interface DatasetExtractResponse {
-  datasets: DatasetItem[];
-  errors: DatasetExtractError[];
+export async function listMLArtifacts(
+  symbol?: string | null,
+): Promise<MLArtifact[]> {
+  const res = await api.get<{ artifacts: MLArtifact[] }>("/strategies/ml-artifacts", {
+    ...(symbol ? { symbol } : {}),
+  });
+  return res.artifacts;
 }
 
-export interface DatasetPreview {
-  id: string;
-  stats: {
-    min_close: number;
-    max_close: number;
-    avg_volume: number;
-    bar_count: number;
-    start_time: string;
-    end_time: string;
-  };
-  sample: {
-    timestamp: string;
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume: number;
-  }[];
+export async function uploadMLArtifact(
+  input: MLArtifactUploadInput,
+): Promise<MLArtifact> {
+  return api.post<MLArtifact>("/strategies/ml-artifacts", {
+    filename: input.filename,
+    symbol: input.symbol ?? null,
+    content: input.content,
+  });
 }
 
-/**
- * Coverage of the watchlist against the extracted Parquet datasets for a
- * given timeframe. Used by the Backtest and Datasets panels so both render
- * the same ✓ covered / ○ missing picture.
- */
-export function datasetCoverage(
-  watchlist: Asset[],
-  datasets: DatasetItem[],
-  timeframe: string,
-): { covered: Asset[]; missing: Asset[]; coveredCount: number; total: number } {
-  const covered = watchlist.filter((a) =>
-    datasets.some((d) => d.symbol === a.symbol && d.timeframe === timeframe),
-  );
-  const coveredCount = covered.length;
-  const missing = watchlist.filter(
-    (a) => !datasets.some((d) => d.symbol === a.symbol && d.timeframe === timeframe),
-  );
-  return { covered, missing, coveredCount, total: watchlist.length };
+export async function getMLArtifact(id: string): Promise<MLArtifact> {
+  return api.get<MLArtifact>(`/strategies/ml-artifacts/${id}`);
+}
+
+export async function deleteMLArtifact(id: string): Promise<{ ok: boolean }> {
+  return api.del<{ ok: boolean }>(`/strategies/ml-artifacts/${id}`);
 }

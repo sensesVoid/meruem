@@ -11,19 +11,15 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 const REC_TONE: Record<string, string> = {
-  code: "text-meruem-gold border-meruem-gold/40 bg-meruem-gold/10",
-  references: "text-meruem-accent border-meruem-accent/40 bg-meruem-accent/10",
-  entries: "text-meruem-accent border-meruem-accent/40 bg-meruem-accent/10",
-  overfit: "text-meruem-red border-meruem-red/40 bg-meruem-red/10",
+  concept: "text-meruem-accent border-meruem-accent/40 bg-meruem-accent/10",
+  qa: "text-meruem-gold border-meruem-gold/40 bg-meruem-gold/10",
   error: "text-meruem-red border-meruem-red/40 bg-meruem-red/10",
   general: "text-meruem-muted border-meruem-border bg-meruem-bg",
 };
 
 const REC_ICON: Record<string, string> = {
-  code: "⚠",
-  references: "+",
-  entries: "◎",
-  overfit: "↯",
+  concept: "◎",
+  qa: "⚠",
   error: "✗",
   general: "→",
 };
@@ -31,34 +27,6 @@ const REC_ICON: Record<string, string> = {
 function fmt(v: number | undefined, digits = 2, suffix = ""): string {
   if (v === undefined || v === null || Number.isNaN(v)) return "—";
   return `${v.toFixed(digits)}${suffix}`;
-}
-
-function McBar({ value, benchmark = 1.0 }: { value?: { p5: number; median: number; p95: number }; benchmark?: number }) {
-  if (!value) return <span className="text-meruem-muted">—</span>;
-  const { p5, median, p95 } = value;
-  const max = Math.max(p95, benchmark * 1.3, 0.1);
-  const lo = Math.min(p5, benchmark, 0);
-  const span = Math.max(max - lo, 0.001);
-  const mark = (x: number) => `${Math.max(0, Math.min(100, ((x - lo) / span) * 100))}%`;
-  return (
-    <div className="relative h-3 w-full rounded bg-meruem-bg">
-      {/* benchmark line */}
-      <div
-        className="absolute top-0 bottom-0 w-px bg-meruem-gold/70"
-        style={{ left: mark(benchmark) }}
-        title={`Benchmark ${benchmark}`}
-      />
-      <div
-        className="absolute top-1/2 h-1.5 -translate-y-1/2 rounded bg-meruem-accent/80"
-        style={{ left: mark(p5), width: `calc(${mark(p95)} - ${mark(p5)})` }}
-      />
-      <div
-        className="absolute top-1/2 h-3 w-0.5 -translate-y-1/2 rounded bg-meruem-text"
-        style={{ left: mark(median) }}
-        title={`median ${fmt(median, 3)}`}
-      />
-    </div>
-  );
 }
 
 function ThinkingStep({ step, open }: { step: PipelineThinkingStep; open: boolean }) {
@@ -152,17 +120,17 @@ export function SynthesisDiagnostics({
   diagnostics: PipelineDiagnostics;
   failed?: boolean;
 }) {
-  const [showScores, setShowScores] = useState(true);
   const [showTrace, setShowTrace] = useState(failed === true);
   const [regNames, setRegNames] = useState<Set<string>>(new Set());
   const [regBusy, setRegBusy] = useState<string | null>(null);
   const [regErr, setRegErr] = useState("");
   const [regInfo, setRegInfo] = useState("");
   const synth = diagnostics.synth ?? {};
-  const scores = diagnostics.scores;
   const recs = diagnostics.recommendations ?? [];
   const thinking = diagnostics.thinking ?? [];
   const proposals = synth.new_primitives ?? [];
+  const qa = synth.qa;
+  const params = synth.params ?? {};
 
   // Pre-mark tools that are already in the registry (registered earlier, or
   // by another run) so their cards read as done instead of asking twice.
@@ -224,30 +192,13 @@ export function SynthesisDiagnostics({
     }
   };
 
-  const iterations = scores?.iterations ?? [];
-  const accepted = iterations.filter((i) => i.accepted);
-  const last =
-    iterations.length > 0
-      ? (accepted.length > 0 ? accepted[accepted.length - 1] : iterations[iterations.length - 1])
-      : null;
-  const rows = last
-    ? [
-        { label: "Trades", train: last.train.n_trades, test: last.test.n_trades, bench: "≥ 5", ok: (v: number) => v >= 5 },
-        { label: "Win rate", train: last.train.win_rate, test: last.test.win_rate, bench: "≥ 50%", ok: (v: number) => v >= 50 },
-        { label: "Sharpe", train: last.train.sharpe, test: last.test.sharpe, bench: "≥ 1.0", ok: (v: number) => v >= 1.0 },
-        { label: "Max DD", train: last.train.max_drawdown, test: last.test.max_drawdown, bench: "—", ok: () => true },
-        { label: "Profit factor", train: last.train.profit_factor, test: last.test.profit_factor, bench: "—", ok: () => true },
-        { label: "Avg trade %", train: last.train.avg_trade_pct, test: last.test.avg_trade_pct, bench: "—", ok: () => true },
-      ]
-    : [];
-
   const tone = failed ? "border-meruem-red/40" : "border-meruem-border";
 
   return (
     <div className={`mb-2 rounded-md border ${tone} bg-meruem-bg/40`}>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-meruem-border/60 px-2 py-1.5">
         <span className="flex items-center gap-1.5 text-[11px] font-semibold text-meruem-text">
-          {failed ? "✗ Synthesis OK — backtest / refine did not pass" : "✓ Synthesis report"}
+          {failed ? "✗ Synthesis report" : "✓ Synthesis report"}
         </span>
         <div className="flex items-center gap-1.5">
           <Badge tone="blue">{synth.provider ?? "unknown"}</Badge>
@@ -320,111 +271,64 @@ export function SynthesisDiagnostics({
         </div>
       )}
 
-      {/* Scores incl. Monte Carlo benchmark */}
-      {last ? (
-        <div className="border-b border-meruem-border/60 px-2 py-2">
-          <button
-            className="flex w-full items-center justify-between text-left"
-            onClick={() => setShowScores(!showScores)}
-          >
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-meruem-muted">
-              Scores · iteration {last.iteration} {last.accepted ? "(accepted)" : "(rejected)"}
-            </span>
-            <span className="text-meruem-accent">{showScores ? "▾" : "▸"}</span>
-          </button>
-          {showScores && (
-            <div className="mt-1.5 space-y-1">
-              <table className="w-full text-[10px]">
-                <thead>
-                  <tr className="text-left text-meruem-muted">
-                    <th className="py-0.5 pr-2 font-medium">Metric</th>
-                    <th className="py-0.5 pr-2 font-medium">Train</th>
-                    <th className="py-0.5 pr-2 font-medium">OOS test</th>
-                    <th className="py-0.5 font-medium">Benchmark</th>
-                  </tr>
-                </thead>
-                <tbody className="text-meruem-text">
-                  {rows.map((r) => (
-                    <tr key={r.label} className="border-t border-meruem-border/40">
-                      <td className="py-0.5 pr-2 text-meruem-muted">{r.label}</td>
-                      <td className={`py-0.5 pr-2 ${r.ok(r.train) ? "text-meruem-green" : "text-meruem-gold"}`}>
-                        {fmt(r.train)}
-                      </td>
-                      <td className={`py-0.5 pr-2 font-medium ${r.ok(r.test) ? "text-meruem-green" : "text-meruem-red"}`}>
-                        {fmt(r.test)}
-                      </td>
-                      <td className="py-0.5 text-meruem-muted">{r.bench}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-
-              {/* Monte Carlo Sharpe benchmark */}
-              <div className="mt-1.5 rounded border border-meruem-border bg-meruem-bg p-1.5">
-                <p className="text-[10px] font-semibold text-meruem-accent">
-                  Monte Carlo Sharpe benchmark{" "}
-                  <span className="font-normal text-meruem-muted">(1500 bootstrap resamples)</span>
-                </p>
-                <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
-                  <div>
-                    <p className="text-meruem-muted">Train · p5 / median / p95</p>
-                    <p className="text-meruem-text">
-                      {fmt(last.train.mc_sharpe?.p5, 3)} / {fmt(last.train.mc_sharpe?.median, 3)} / {fmt(last.train.mc_sharpe?.p95, 3)}
-                    </p>
-                    <McBar value={last.train.mc_sharpe} />
-                  </div>
-                  <div>
-                    <p className="text-meruem-muted">OOS test · p5 / median / p95</p>
-                    <p className="text-meruem-text">
-                      {fmt(last.test.mc_sharpe?.p5, 3)} / {fmt(last.test.mc_sharpe?.median, 3)} / {fmt(last.test.mc_sharpe?.p95, 3)}
-                    </p>
-                    <McBar value={last.test.mc_sharpe} />
-                  </div>
-                </div>
-                {last.train.mc_costs && last.test.mc_costs && (
-                  <div className="mt-1.5 border-t border-meruem-border/60 pt-1.5">
-                    <p className="text-[10px] font-semibold text-meruem-gold">
-                      Cost-adjusted benchmark{" "}
-                      <span className="font-normal text-meruem-muted">
-                        (randomized spread {last.train.mc_costs.spread_bps} bps · slippage {last.train.mc_costs.slippage_bps} bps per trade)
-                      </span>
-                    </p>
-                    <div className="mt-1 grid grid-cols-2 gap-x-3 gap-y-1">
-                      <div>
-                        <p className="text-meruem-muted">Train · Sharpe p5 / median / p95</p>
-                        <p className="text-meruem-text">
-                          {fmt(last.train.mc_costs.sharpe_p5, 3)} / {fmt(last.train.mc_costs.sharpe_median, 3)} / {fmt(last.train.mc_costs.sharpe_p95, 3)}
-                        </p>
-                        <McBar value={{ p5: last.train.mc_costs.sharpe_p5, median: last.train.mc_costs.sharpe_median, p95: last.train.mc_costs.sharpe_p95 }} />
-                      </div>
-                      <div>
-                        <p className="text-meruem-muted">OOS test · Sharpe p5 / median / p95</p>
-                        <p className="text-meruem-text">
-                          {fmt(last.test.mc_costs.sharpe_p5, 3)} / {fmt(last.test.mc_costs.sharpe_median, 3)} / {fmt(last.test.mc_costs.sharpe_p95, 3)}
-                        </p>
-                        <McBar value={{ p5: last.test.mc_costs.sharpe_p5, median: last.test.mc_costs.sharpe_median, p95: last.test.mc_costs.sharpe_p95 }} />
-                      </div>
-                    </div>
-                  </div>
-                )}
-                <p className="mt-1 text-[9px] text-meruem-muted">
-                  Gold tick = 1.0 benchmark. Band = 90% of bootstrapped Sharpe outcomes; a median below the tick means the edge likely does not survive cost randomization.
-                </p>
+      {/* QA gate verdict */}
+      <div className="border-b border-meruem-border/60 px-2 py-2">
+        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-meruem-muted">
+          QA gate verdict
+        </p>
+        <div className="space-y-1">
+          {qa ? (
+            <>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge
+                  tone={
+                    qa.verdict === "PASS" ? "green"
+                      : qa.verdict === "FAIL" ? "red" : "gold"
+                  }
+                >
+                  {qa.verdict}
+                </Badge>
+                <span className="text-[10px] text-meruem-muted">
+                  quality score {fmt(qa.quality_score, 0)} / 100
+                  {qa.provider ? ` · ${qa.provider}` : ""}
+                </span>
               </div>
-
-              {iterations.length > 1 && (
-                <p className="text-[9px] text-meruem-muted">
-                  {iterations.length} refinement iteration(s) — best accepted kept.
-                </p>
+              {qa.issues && qa.issues.length > 0 && (
+                <ul className="list-disc pl-4 text-[10px] text-meruem-muted">
+                  {qa.issues.map((issue, i) => (
+                    <li key={i}>{issue}</li>
+                  ))}
+                </ul>
               )}
-            </div>
+            </>
+          ) : (
+            <p className="text-[10px] text-meruem-muted">No QA verdict recorded.</p>
           )}
         </div>
-      ) : (
-        <p className="px-2 py-1.5 text-[10px] text-meruem-muted">
-          No backtest scores available — refinement never produced a runnable iteration.
+      </div>
+
+      {/* Proxy scan parameters */}
+      <div className="border-b border-meruem-border/60 px-2 py-2">
+        <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-meruem-muted">
+          Proxy parameters (used by the Scanner's indicator engine)
         </p>
-      )}
+        {Object.keys(params).length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {Object.entries(params).map(([k, v]) => (
+              <span
+                key={k}
+                className="rounded bg-meruem-panel px-1 py-0.5 font-mono text-[9px] text-meruem-accent"
+              >
+                {k}: {v}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[10px] text-meruem-muted">
+            No parameters recorded — defaults apply (fast 20, slow 50, rsi 14, atr 14).
+          </p>
+        )}
+      </div>
 
       {/* Recommendations */}
       {recs.length > 0 && (

@@ -131,6 +131,26 @@ export function VaultPanel() {
     return status.slots.some((s) => s.namespace === ns && s.username === user && s.configured);
   };
 
+  const storedSlot = (keyRef: string) => {
+    const [ns, user] = keyRef.split(":");
+    return status.slots.find((s) => s.namespace === ns && s.username === user && s.configured);
+  };
+
+  const deleteKey = async (keyRef: string, id: string) => {
+    const [ns, user] = keyRef.split(":");
+    if (!window.confirm(`Delete the stored API key for "${id}" from the OS keychain?`)) return;
+    try {
+      await api.del(`/vault/${ns}/${user}`);
+      setKeys((k) => ({ ...k, [id]: "" }));
+      setTest((t) => ({ ...t, [id]: { running: false, ok: null, error: "" } }));
+      setMsgs((m) => ({ ...m, [id]: "Key deleted from OS keychain" }));
+      setTimeout(() => setMsgs((m) => ({ ...m, [id]: "" })), 2500);
+      load();
+    } catch (e) {
+      setErrors((m) => ({ ...m, _save: e instanceof Error ? e.message : String(e) }));
+    }
+  };
+
   const saveProviders = async (providers: LLMProvider[]) => {
     await api.put("/settings", { key: "llm_providers", value: providers });
     setStatus((s) => ({ ...s, providers }));
@@ -540,16 +560,31 @@ export function VaultPanel() {
                     type="password"
                     value={keys[p.id] ?? ""}
                     onChange={(e) => setKeys((k) => ({ ...k, [p.id]: e.target.value }))}
-                    placeholder={configured(p.key_ref) ? "Key stored — enter to replace" : "Paste API key"}
+                    placeholder={configured(p.key_ref) ? "New key (enter to replace)" : "Paste API key"}
                   />
                 </label>
                 <Button size="sm" variant="outline" onClick={() => testApiKey(p.id)}>
                   Test
                 </Button>
+                <Button size="sm" variant="danger" disabled={!configured(p.key_ref)} onClick={() => deleteKey(p.key_ref, p.id)} title="Delete the stored key from the OS keychain">
+                  Delete
+                </Button>
                 <Button size="sm" variant={p.enabled ? "ghost" : "default"} onClick={() => updateProvider(p.id, { enabled: !p.enabled })}>
                   {p.enabled ? "Disable" : "Enable"}
                 </Button>
               </div>
+              {(() => {
+                const slot = storedSlot(p.key_ref);
+                if (slot?.redacted) {
+                  return (
+                    <p className="text-[11px] text-meruem-muted">
+                      Stored in OS keychain (persists across relaunch):{" "}
+                      <span className="font-mono text-meruem-accent" title="Masked preview — your key is retained, no need to re-paste">{slot.redacted}</span>
+                    </p>
+                  );
+                }
+                return null;
+              })()}
               {msgs[p.id] && <p className="text-[11px] text-meruem-green">{msgs[p.id]}</p>}
               {(() => {
                 const t = test[p.id];

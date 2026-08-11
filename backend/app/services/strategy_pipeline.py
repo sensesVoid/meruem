@@ -1,12 +1,14 @@
 """Automatic strategy submission pipeline.
 
-Synthesizes (RAG-grounded) -> merged QA gate -> backtest/refine loop -> save in a
-background thread so the UI can show live progress. The strategy is only finalized
-(its best spec and meaningful status) once the whole QA+optimization gate has
-completed successfully and a best setup is found.
+Synthesizes (RAG-grounded) -> merged QA gate -> finalize in a background thread
+so the UI can show live progress. The strategy is only finalized (its clean entry
+criteria, proxy parameters and status) once the whole QA gate has completed
+successfully. QA verdicts come from the synthesis call chain itself — the
+standalone backtest/refine loop was retired in favor of the QA-self-check that
+rides inside synthesis.
 
 Pipeline stages (shown to the user via the job store):
-  queued -> synth -> qa -> optimize -> finalize -> done / error
+  queued -> synth -> qa -> finalize -> done / error
 """
 
 import json
@@ -16,21 +18,20 @@ import uuid
 from sqlmodel import Session, select
 
 from app.core.db import engine
-from app.models.entities import BacktestRun, Strategy
-from app.services.backtest_engine import MIN_OOS_TRADES, BacktestEngine
+from app.models.entities import Strategy
 from app.services.rag import RagService
 
 _JOBS: dict[str, dict] = {}
 _LOCK = threading.Lock()
 
-# Asset-agnostic default: if no symbol is supplied the strategy is validated
-# against a representative basket so its edge is not tied to one market.
+# Asset-agnostic default: if no symbol is supplied the strategy is still
+# synthesized fine — the scanner re-reads params per asset at scan time.
 DEFAULT_SYMBOLS = ["EURUSD", "XAUUSD", "BTCUSDT"]
 
 
 def _parse_timeframe_hint(markdown: str) -> str | None:
     """Pick a timeframe the strategy mentions in its rules (e.g. "1h", "15m", "4h").
-    First explicit token wins; the pipeline still validates on that tf + the basket."""
+    First explicit token wins."""
     import re
 
     tokens = re.findall(r"\b(\d{1,3}\s?(?:m|h|d|M)\b)", markdown, flags=re.IGNORECASE)
@@ -58,7 +59,7 @@ def _reference_sources(exclude_id: str | None = None) -> list[dict]:
     """All saved REFERENCE documents (the source library) to combine into a synthesis.
 
     References are concept-only strategies (status ``reference``) that are not
-    themselves backtestable; synthesis compiles their ideas into one entry. The
+    themselves executable; synthesis compiles their ideas into one entry. The
     strategy currently being synthesized is excluded so it stays the primary.
     """
     with Session(engine) as session:
@@ -71,129 +72,46 @@ def _reference_sources(exclude_id: str | None = None) -> list[dict]:
     ]
 
 
-def _metrics_green(gate: dict, tolerance: float = 0.35) -> bool:
-    """All metrics green on the OUT-OF-SAMPLE (test) window, with an overfit guard.
-
-    The real evidence of a generalizable strategy is the held-out test window
-    performing to standard on its own. Requiring the in-sample train window to also
-    pass the same bar would wrongly reject good strategies (the model may simply be
-    more decisive on unseen data). Overfitting is instead detected as a gap where
-    train (in-sample) is far stronger than test (OOS) — a model that excels in-sample
-    but collapses out-of-sample is curve-fit.
-    """
-    if gate["n_trades_test"] < MIN_OOS_TRADES:
-        return False
-    if gate["win_rate_test"] < 50.0:
-        return False
-    if gate["sharpe_test"] < 1.0:
-        return False
-    # Overfit guard: OOS must hold up relative to in-sample, never collapse.
-    if gate["sharpe_train"] > 0 and (
-        gate["sharpe_test"] < gate["sharpe_train"] * (1 - tolerance)
-        and gate["sharpe_test"] < 1.0
-    ):
-        return False
-    return True
-
-
-def _metrics_overfit_guard(best: dict) -> dict:
-    """Human-facing verdict on the best refinement. ALL OUT-OF-SAMPLE metrics must be
-    green before a strategy qualifies; high in-sample but collapsing OOS marks
-    overfitting and is rejected."""
-    train = best.get("train") or {}
-    test = best.get("test") or {}
-    n_trades_test = test.get("n_trades", 0)
-    return {
-        "n_trades_train": train.get("n_trades", 0),
-        "n_trades_test": n_trades_test,
-        "win_rate_train": train.get("win_rate", 0.0),
-        "win_rate_test": test.get("win_rate", 0.0),
-        "sharpe_train": train.get("sharpe", 0.0),
-        "sharpe_test": test.get("sharpe", 0.0),
-        "max_drawdown_train": train.get("max_drawdown", 0.0),
-        "max_drawdown_test": test.get("max_drawdown", 0.0),
-        "profit_factor_train": train.get("profit_factor", 0.0),
-        "profit_factor_test": test.get("profit_factor", 0.0),
-    }
-
-
-def _recommendations(gate: dict | None = None, green: bool | None = None,
-                     scores: dict | None = None, error: str = "") -> list[dict]:
-    """Actionable next steps when a synthesis backtest/refine does not pass.
+def _recommendations(qa: dict | None = None, error: str = "") -> list[dict]:
+    """Actionable next steps when a synthesis QA gate does not pass.
 
     Deterministic (offline-safe) — derives recommendations from the actual
-    failure mode (too few trades, weak win rate, low Sharpe, overfit, sandbox
-    rejection) so the user knows what to do next (add more references, look for
-    more entry examples, simplify, etc.).
+    failure mode (QA verdict + reported issues) so the user knows what to do
+    next (add more references, write more concrete rules, etc.).
     """
     recs: list[dict] = []
-    if green:
+    qa = qa or {}
+    if qa.get("verdict") == "PASS":
         return []  # approved — no recommendations needed
-    n = wr = sh = 0
-    tr_sh = 0.0
-    has_scores = bool(gate or (scores and scores.get("iterations")))
-    if gate:
-        n = int(gate.get("n_trades_test") or 0)
-        wr = float(gate.get("win_rate_test") or 0)
-        sh = float(gate.get("sharpe_test") or 0)
-        tr_sh = float(gate.get("sharpe_train") or 0)
-    elif scores and scores.get("iterations"):
-        iters = scores["iterations"]
-        accepted = [i for i in iters if i.get("accepted")]
-        last = (accepted[-1] if accepted else iters[-1])
-        test = (last or {}).get("test") or {}
-        n = int(test.get("n_trades") or 0)
-        wr = float(test.get("win_rate") or 0)
-        sh = float(test.get("sharpe") or 0)
-
-    if error and "sandbox" in str(error).lower():
+    issues = qa.get("issues") or []
+    if qa.get("verdict") == "FAIL":
         recs.append({
-            "type": "code",
-            "text": ("The generated strategy code was rejected by the safety "
-                      "sandbox. The entry may rely on mechanics that cannot be "
-                      "expressed safely — simplify the concept or re-synthesize "
-                      "with a clearer, more standard setup."),
+            "type": "concept",
+            "text": ("QA failed — the synthesized entry is not machine-actionable. "
+                      "Rewrite the concept with exact entry, stop and take-profit "
+                      "conditions and re-synthesize."),
         })
-    if has_scores:
-        if n < MIN_OOS_TRADES:
-            recs.append({
-                "type": "references",
-                "text": (f"Too few trades (OOS {n}, need at least {MIN_OOS_TRADES}) — "
-                          "the setup is too selective. Save more reference concepts "
-                          "and look for more entry examples so the synthesis merges "
-                          "richer, less restrictive rules."),
-            })
-        if n > 0 and wr < 50:
-            recs.append({
-                "type": "entries",
-                "text": (f"Win rate {wr:.1f}% is below the 50% baseline — the edge is "
-                          "weak. Add more entry examples / confluences to the library, "
-                          "or a mean-reversion or timing reference to improve entry "
-                          "quality."),
-            })
-        if n > 0 and sh < 1.0:
-            recs.append({
-                "type": "entries",
-                "text": (f"OOS Sharpe {sh:.2f} is below the 1.0 benchmark — the edge "
-                          "is inconsistent. Broaden the concept with additional "
-                          "references and entry examples before re-running."),
-            })
-        if gate and tr_sh > 0 and sh < tr_sh * 0.65:
-            recs.append({
-                "type": "overfit",
-                "text": ("The setup overfits in-sample: OOS collapses vs train. "
-                          "Simplify the concept — fewer, more robust rules — and add "
-                          "more diverse references."),
-            })
+    elif issues:
+        recs.append({
+            "type": "concept",
+            "text": ("QA found issues below — address them in the concept and "
+                      "re-synthesize. More concrete, verifiable rules pass the "
+                      "gate."),
+        })
+    for issue in issues[:5]:
+        recs.append({
+            "type": "qa",
+            "text": f"QA issue: {issue}",
+        })
     if error:
         recs.append({
             "type": "error",
-            "text": f"Backtest / refine failed: {error}",
+            "text": f"Synthesis failed: {error}",
         })
     if not recs:
         recs.append({
             "type": "general",
-            "text": ("Metrics did not reach the approval gate. Save more trading "
+            "text": ("QA did not pass the approval gate. Save more trading "
                       "concepts as references, gather more entry examples, and "
                       "refine the concept before resubmitting."),
         })
@@ -252,11 +170,10 @@ def _thinking_trace(draft: dict) -> list[dict]:
 
 
 def _build_diagnostics(draft: dict, concept: str, strat_id: str | None,
-                       error: str = "", gate: dict | None = None,
-                       green: bool | None = None) -> dict:
-    """Rich post-synthesis diagnostics for the UI: the actual synthesized
-    strategy, the backtest scores (incl. the Monte-Carlo benchmark) and
-    actionable recommendations, plus the visible thinking trace."""
+                       error: str = "") -> dict:
+    """Post-synthesis diagnostics for the UI: the actual synthesized strategy,
+    the proxy parameters, actionable recommendations, and the visible thinking
+    trace."""
     synth = {
         "concept": concept,
         "entry_markdown": draft.get("entry_markdown") or "",
@@ -264,6 +181,7 @@ def _build_diagnostics(draft: dict, concept: str, strat_id: str | None,
         "approximations": draft.get("approximations") or [],
         "grounded_on": draft.get("grounded_on") or [],
         "summary": draft.get("summary") or "",
+        "params": draft.get("params"),
         "self_check": draft.get("self_check"),
         "qa": draft.get("qa"),
         "grounding": draft.get("grounding"),
@@ -272,31 +190,9 @@ def _build_diagnostics(draft: dict, concept: str, strat_id: str | None,
         "new_primitive_errors": draft.get("new_primitive_errors") or [],
         "rag_docs": (draft.get("rag_docs") or [])[:4],
     }
-    scores = None
-    if strat_id is not None:
-        try:
-            with Session(engine) as session:
-                rows = session.exec(
-                    select(BacktestRun).where(BacktestRun.strategy_id == strat_id)
-                    .order_by(BacktestRun.created_at.desc()).limit(8)
-                ).all()
-            if rows:
-                scores = {"iterations": [
-                    {
-                        "iteration": r.iteration,
-                        "accepted": bool(r.accepted),
-                        "rationale": r.rationale,
-                        "train": (json.loads(r.metrics_json or "{}").get("train") or {}),
-                        "test": (json.loads(r.metrics_json or "{}").get("test") or {}),
-                    }
-                    for r in reversed(rows)
-                ]}
-        except Exception:  # noqa: BLE001 - diagnostics are best-effort
-            scores = None
     return {
         "synth": synth,
-        "scores": scores,
-        "recommendations": _recommendations(gate, green, scores, error),
+        "recommendations": _recommendations(draft.get("qa"), error),
         "thinking": _thinking_trace(draft),
     }
 
@@ -305,10 +201,6 @@ def _run_worker(job_id: str, payload: dict) -> None:
     tf_hint = _parse_timeframe_hint(payload.get("body_markdown") or "")
     symbol = payload.get("symbol") or DEFAULT_SYMBOLS[0]
     timeframe = payload.get("timeframe") or tf_hint or "1h"
-    bars = int(payload.get("bars") or 6000)
-    max_iterations = int(payload.get("max_iterations") or 6)
-    min_winrate = float(payload.get("min_winrate") or 55.0)
-    min_sharpe = float(payload.get("min_sharpe") or 1.0)
     concept = (payload.get("concept_markdown") or "").strip()
     references = _reference_sources(exclude_id=payload.get("strategy_id"))
 
@@ -338,8 +230,8 @@ def _run_worker(job_id: str, payload: dict) -> None:
         # AUTO-SYNTHESIS (single path concept->entry, #8): the Synthesizer Agent
         # (RAG-grounded) ALWAYS derives the executable ENTRY CRITERIA from the
         # trading concept, self-verifies it, and returns the merged QA gate. The
-        # standalone QA agent was retired in favor of this deterministic + LLM
-        # self-check that rides inside the same call chain.
+        # QA verdict rides inside the same call chain, so the backtest/refine
+        # loop is no longer part of the pipeline.
         with Session(engine) as session:
             from app.agents.synthesizer import SynthesizerAgent
 
@@ -355,8 +247,6 @@ def _run_worker(job_id: str, payload: dict) -> None:
         grounded = bool(draft.get("grounded"))
         # Output that cannot go LIVE: heuristic template (LLM offline) or an
         # entry with ZERO source trace after the grounding self-correction.
-        # PARTIAL (>= 0.4) is allowed — most rules ARE grounded — so only these
-        # two cases block auto-activation.
         live_blocked = bool(
             draft.get("provider") == "heuristic"
             or grounding.get("verdict") == "UNGROUNDED")
@@ -364,9 +254,11 @@ def _run_worker(job_id: str, payload: dict) -> None:
             drafted_entry = True
             submitted_entry = draft["entry_markdown"]
 
-        # QA-rewritten body is the clean, executable ENTRY CRITERIA we optimize;
-        # the concept is preserved as-is for ingestion.
+        # QA-rewritten body is the clean, executable ENTRY CRITERIA; the concept
+        # is preserved as-is for ingestion. Proxy parameters come straight from
+        # synthesis — the scanner re-reads them per asset at scan time.
         body = (qa.get("rewritten_markdown") or submitted_entry).strip()
+        params = draft.get("params") or {}
 
         with Session(engine) as session:
             if payload.get("strategy_id"):
@@ -430,131 +322,64 @@ def _run_worker(job_id: str, payload: dict) -> None:
                               "resubmit."))
                 return
 
-            # Only now persist the QA-cleaned body.
+            # Persist the QA-cleaned body + the proxy parameters that the scanner
+            # uses to compute indicators at scan time.
             strat.body_markdown = body
+            strat.params_json = json.dumps(params)
             session.add(strat)
             session.commit()
 
-            _set(job_id, stage="optimize", progress=0.1,
+            _set(job_id, stage="finalize", progress=0.9,
                  strategy_id=strat.id,
-                 message="AI is interpreting your rules into executable strategy code…")
+                 message="Finalizing strategy…")
 
-            from app.agents.strategy_codegen import StrategyCodeGen, heuristic_strategy
-            from app.services.code_sandbox import validate_code
-
-            engine_ = BacktestEngine()
-            try:
-                gen = StrategyCodeGen()
-                try:
-                    compiled_rules = (ir.get("compiled_blueprint") or {}).get(
-                        "rules") or []
-                    generated = gen.generate(
-                        strat.name, concept, body, symbol, timeframe,
-                        ir_blueprint=compiled_rules or None)
-                except Exception:  # noqa: BLE001
-                    # LLM unavailable — fall back to a safe proxy template so the
-                    # pipeline still completes (it is still backtested faithfully).
-                    generated = heuristic_strategy()
-                code = generated.get("code") or ""
-                ok, cerr = validate_code(code)
-                if not ok:
-                    raise ValueError(f"AI strategy rejected by safety sandbox: {cerr}")
-                result = engine_.refine_code_loop(
-                    session, strat, symbol, timeframe, code,
-                    bars, max_iterations, min_winrate, min_sharpe,
-                    confluence=generated.get("confluence") or {},
-                    concept=concept,
-                )
-            except ValueError as exc:
-                strat.status = "failed"
-                strat.qa_notes = str(exc)
-                session.add(strat)
-                session.commit()
-                _set(job_id, stage="optimize", progress=1.0,
-                     diagnostics=_build_diagnostics(
-                         draft, concept, strat.id, error=str(exc)))
-                raise RuntimeError(str(exc))
-
-            best = result.get("best")
-            if best is None:
-                strat.status = "failed"
-                strat.qa_notes = "No acceptable setup was found after refinement."
-                session.add(strat)
-                session.commit()
-                _set(job_id, stage="optimize", progress=1.0,
-                     diagnostics=_build_diagnostics(
-                         draft, concept, strat.id,
-                         error="No acceptable setup was found after refinement."))
-                raise RuntimeError("No acceptable setup was found after refinement.")
-
-            gate = _metrics_overfit_guard(best)
-            green = _metrics_green(gate)
-
-            # Apply the best code + confluence spec onto the strategy.
-            strat.strategy_code = best.get("code") or code
-            strat.params_json = json.dumps(best.get("confluence") or {})
-            # STRICT GROUNDING: only grounded (or partially-grounded, post-repair)
-            # output may auto-go ACTIVE. The offline heuristic template completes
-            # the pipeline (product design) but always lands as a DRAFT, never live.
+            # QA PASS + grounded output may auto-go ACTIVE. The offline heuristic
+            # template completes the pipeline (product design) but always lands as
+            # a DRAFT, never live. Otherwise the strategy stays a DRAFT until the
+            # user reviews and approves it.
             if live_blocked:
                 strat.status = "draft"
                 strat.qa_notes = (
                     "Entry was not grounded on the ingested concepts (e.g. LLM "
                     "unavailable) — review the synthesized entry before approving.")
-            else:
-                strat.status = "active" if green else "draft"
+            elif qa.get("verdict") == "PASS":
+                strat.status = "active"
                 strat.qa_notes = ""
+            else:
+                strat.status = "draft"
+                strat.qa_notes = qa.get("summary") or "QA did not pass yet."
             session.add(strat)
             session.commit()
             RagService(session).index_strategy(strat)
             session.refresh(strat)
 
-            # Store green-verdict on the best accepted BacktestRun for approval use.
-            accepted_run = session.exec(
-                select(BacktestRun).where(
-                    BacktestRun.strategy_id == strat.id, BacktestRun.accepted == 1
-                ).order_by(BacktestRun.created_at.desc())
-            ).first()
-            if accepted_run is not None:
-                accepted_run.accepted = 1 if green else 0
-                session.add(accepted_run)
-                session.commit()
-
             # Capture plain values BEFORE the session closes; reading attributes
             # off a detached instance (expired on commit) raises a refresh error.
             strat_id = strat.id
-            result_gate = gate
-            result_green = green
-            result_spec = best.get("confluence") or {}
-            result_had_code = bool(best.get("code") or code)
+            result_params = params
             result_status = strat.status
             result_live_blocked = live_blocked
 
         drafted_note = " Entry criteria were auto-drafted by AI." if drafted_entry else ""
         if result_status == "active":
-            result_message = "Strategy optimized and active — all metrics green."
+            result_message = "Strategy active — QA passed."
         elif result_live_blocked:
             result_message = ("Strategy saved as draft — the synthesized entry was "
                               "not grounded on the ingested concepts; review it "
                               "before approving.")
         else:
-            result_message = ("Strategy saved as draft; metrics did not all pass "
-                              "the approval gate yet.")
+            result_message = ("Strategy saved as draft; QA did not pass the gate "
+                              "yet — review the synthesized entry before "
+                              "approving.")
         _set(
             job_id, status="done", stage="done", progress=1.0,
             strategy_id=strat_id,
             message=result_message + drafted_note,
-            gate=result_gate,
-            green=result_green,
-            spec=result_spec,
-            faithful=result_had_code,
-            drafted_entry=drafted_entry,
+            params=result_params,
             grounded=grounded,
             grounding=grounding,
             ir=ir,
-            diagnostics=_build_diagnostics(
-                draft, concept, strat_id,
-                gate=result_gate, green=result_green),
+            diagnostics=_build_diagnostics(draft, concept, strat_id),
         )
     except Exception as exc:  # noqa: BLE001
         # Persist the failure so the user can edit / discard / ask AI to fix it.
@@ -570,11 +395,11 @@ def _run_worker(job_id: str, payload: dict) -> None:
                         _set(job_id, strategy_id=strat_id)
             except Exception:  # noqa: BLE001
                 pass
-        # Keep the meaningful stage (e.g. "optimize" = synthesis succeeded but
-        # backtest/refine failed) so the UI can show where it stopped.
+        # Keep the meaningful stage (e.g. "qa" = synthesis succeeded but QA
+        # failed) so the UI can show where it stopped.
         current = _get(job_id) or {}
         stage = current.get("stage")
-        if stage not in ("synth", "qa", "optimize", "finalize"):
+        if stage not in ("synth", "qa", "finalize"):
             stage = "error"
         extra: dict = {}
         if draft:

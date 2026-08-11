@@ -3,7 +3,7 @@ import uuid
 
 from sqlmodel import Session, select
 
-from app.agents.xgb_scanner import XGBoostScannerAgent
+from app.agents.scanner import ScannerAgent
 from app.agents.validator import ValidationFailed, ValidatorChain
 from app.core.db import engine
 from app.models.entities import Account, Scan, Strategy, Validation
@@ -18,7 +18,7 @@ class Orchestrator:
     def __init__(self, session: Session):
         self.session = session
         self.settings = SettingsService(session)
-        self.scanner = XGBoostScannerAgent()
+        self.scanner = ScannerAgent()
         self.validator_chain = ValidatorChain()
 
 
@@ -80,9 +80,12 @@ class Orchestrator:
                     "news_blocked": True}
 
         indicators = self._compute_indicators(ohlcv, strategies)
+        from app.services.ml_artifact import context_for as ml_context_for
+
         candidate = self.scanner.scan(
             ohlcv, indicators, [self._rule_pack(s) for s in strategies],
-            references=references)
+            references=references,
+            ml_context=ml_context_for(asset.symbol))
         candidate = self.scanner.normalize(candidate)
 
         # Persist concrete references to the approved strategies the scan used
@@ -110,26 +113,11 @@ class Orchestrator:
         return self._validate(scan, candidate)
 
     def _active_strategies(self, asset: object) -> list[Strategy]:
-        """Approved strategies that match the asset's class/timeframe.
-
-        Matching is exact-first on asset_class, then class-agnostic fallback so a
-        crypto setup can still reuse a forex momentum rule if the trader approved it.
-        """
-        asset_class = (asset.asset_class or "").strip().lower()
-        rows = self.session.exec(
+        """All approved (active) strategies. The scanner reasons over every
+        approved strategy's rules + proxy params for the scanned asset."""
+        return self.session.exec(
             select(Strategy).where(Strategy.status == "active")
         ).all()
-
-        exact = [
-            s for s in rows
-            if (s.asset_class or "").strip().lower() == asset_class
-        ]
-        if exact:
-            return exact
-        broad = [s for s in rows if self._class_matches(s, asset_class)]
-        if broad:
-            return broad
-        return list(rows)
 
     def _reference_docs(self, asset: object | None = None,
                         symbol: str | None = None) -> list[dict]:
@@ -150,24 +138,12 @@ class Orchestrator:
                 result.append({
                     "id": s.id,
                     "name": s.name,
-                    "asset_class": s.asset_class,
                     "concept": concept,
                 })
         return result
 
-    @staticmethod
-    def _class_matches(strategy: Strategy, asset_class: str) -> bool:
-        s = (strategy.asset_class or "").strip().lower()
-        if s == asset_class:
-            return True
-        pairs = {
-            ("cripto", "crypto"), ("crypto", "cripto"),
-            ("fx", "forex"), ("forex", "fx"),
-        }
-        return (s, asset_class) in pairs
-
     def _rule_pack(self, strategy: Strategy) -> dict:
-        """Structured rules + applied (refined) params for one approved strategy."""
+        """Structured rules + proxy params for one approved strategy."""
         params: dict = {}
         if strategy.params_json:
             try:
@@ -179,8 +155,6 @@ class Orchestrator:
         return {
             "id": strategy.id,
             "name": strategy.name,
-            "asset_class": strategy.asset_class,
-            "timeframe": strategy.timeframe,
             "params": params,
             "concept": strategy.concept_markdown or "",
             "rules": strategy.body_markdown,

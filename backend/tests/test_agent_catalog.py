@@ -22,7 +22,7 @@ def test_catalog_has_all_agents():
     ids = {a["id"] for a in AGENT_CATALOG}
     assert {
         "scanner", "validator", "regime", "news", "ingestion",
-        "synthesizer", "backtest", "refiner", "ltr", "qa",
+        "synthesizer", "ltr", "qa", "risk_manager",
     } <= ids
 
 

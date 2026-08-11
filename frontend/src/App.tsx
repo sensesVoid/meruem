@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { TopNav } from "@/components/TopNav";
 import { ChartPanel } from "@/components/ChartPanel";
 import { WatchlistPanel } from "@/components/WatchlistPanel";
@@ -11,11 +11,10 @@ import { VaultPanel } from "@/components/VaultPanel";
 import { BrokersPanel } from "@/components/BrokersPanel";
 import { NewsPanel } from "@/components/NewsPanel";
 import { RegimePanel } from "@/components/RegimePanel";
-import { MLPanel } from "@/components/MLPanel";
 import { Asset } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
-type Tab = "chart" | "signals" | "trades" | "strategies" | "dashboard" | "risk" | "ml" | "vault" | "brokers";
+type Tab = "chart" | "signals" | "trades" | "strategies" | "dashboard" | "risk" | "vault" | "brokers";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "dashboard", label: "Dashboard" },
@@ -25,21 +24,12 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "brokers", label: "Brokers" },
   { id: "risk", label: "Risk Settings" },
   { id: "strategies", label: "Strategies" },
-  { id: "ml", label: "ML Scanner" },
   { id: "vault", label: "Vault" },
 ];
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("chart");
   const [active, setActive] = useState<Asset | null>(null);
-
-  // Cross-panel navigation: panels (e.g. the Backtest coverage strip) can ask
-  // the app to jump to the ML Scanner tab to extract missing datasets.
-  useEffect(() => {
-    const goToMl = () => setTab("ml");
-    window.addEventListener("app:go-to-ml", goToMl);
-    return () => window.removeEventListener("app:go-to-ml", goToMl);
-  }, []);
 
   return (
     <div className="flex h-screen flex-col">
@@ -77,7 +67,6 @@ export default function App() {
           {tab === "strategies" && <StrategyLibraryPanel />}
           {tab === "dashboard" && <DashboardPanel />}
           {tab === "risk" && <RiskPanel />}
-          {tab === "ml" && <MLPanel />}
           {tab === "vault" && <VaultPanel />}
           {tab === "brokers" && <BrokersPanel />}
         </section>

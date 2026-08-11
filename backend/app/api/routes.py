@@ -9,7 +9,6 @@ from app.core.db import get_session
 from app.models.entities import (
     Account,
     Asset,
-    BacktestRun,
     Scan,
     Setting,
     Strategy,
@@ -120,11 +119,13 @@ def vault_status():
             ns, user = ref.split(":", 1)
         else:
             ns, user = "llm", ref
+        secret = VaultService.get(ns, user)
         slots.append(
             {
                 "namespace": ns,
                 "username": user,
-                "configured": VaultService.has(ns, user),
+                "configured": secret is not None,
+                "redacted": VaultService.redact(secret),
             }
         )
     return {
@@ -196,6 +197,35 @@ def provider_test(provider_id: str):
     if provider is None:
         raise HTTPException(404, "unknown provider")
 
+    # Model resolution: explicit provider model first; otherwise fall back to a
+    # per-agent assigned model this provider serves (a provider can be left
+    # without its own model when agents decide the models that hit it).
+    def _resolve_model() -> str:
+        configured = provider.get("model", "") or ""
+        if configured:
+            return configured
+        from app.services.model_config import AGENT_CATALOG, get_agent_model
+
+        owners: dict[str, str] = {}
+        for p in get_providers():
+            if p.get("model"):
+                owners[str(p["model"])] = str(p["id"])
+        for a in AGENT_CATALOG:
+            if a.get("engine") != "cloud":
+                continue
+            candidate = get_agent_model(a["id"])
+            if candidate and owners.get(candidate) == provider_id:
+                return candidate
+        for a in AGENT_CATALOG:
+            if a.get("engine") != "cloud":
+                continue
+            candidate = get_agent_model(a["id"])
+            if candidate:
+                return candidate
+        return ""
+
+    model = _resolve_model()
+
     ref = provider.get("key_ref", "")
     if ":" in ref:
         ns, user = ref.split(":", 1)
@@ -205,16 +235,13 @@ def provider_test(provider_id: str):
     if not key:
         return {
             "ok": False, "provider": provider_id,
-            "model": provider.get("model", ""),
+            "model": model,
             "error": "no API key stored — paste a key and save it first",
         }
 
-    # Model priority: the agent-assigned model if one of them hosts this
-    # provider's model, else the provider's configured model.
     from openai import OpenAI
     try:
         client = OpenAI(base_url=provider["base_url"], api_key=key)
-        model = provider.get("model", "")
         start = time.time()
         chat = client.chat.completions.create(
             model=model,
@@ -238,7 +265,7 @@ def provider_test(provider_id: str):
         return {
             "ok": False,
             "provider": provider_id,
-            "model": provider.get("model", ""),
+            "model": model,
             "error": f"{type(exc).__name__}: {exc}",
         }
 
@@ -823,8 +850,6 @@ class StrategyPayload(BaseModel):
     name: str
     concept_markdown: str = ""
     body_markdown: str
-    asset_class: str = ""
-    timeframe: str = ""
     status: str = "active"
 
 
@@ -832,8 +857,6 @@ class StrategyUpdatePayload(BaseModel):
     name: str | None = None
     concept_markdown: str | None = None
     body_markdown: str | None = None
-    asset_class: str | None = None
-    timeframe: str | None = None
     status: str | None = None
     qa_notes: str | None = None
 
@@ -842,8 +865,6 @@ class StrPreparationPayload(BaseModel):
     name: str = ""
     concept_markdown: str = ""
     body_markdown: str
-    asset_class: str = ""
-    timeframe: str = ""
 
 
 @router.get("/strategies")
@@ -858,8 +879,6 @@ def create_strategy(payload: StrategyPayload, session: Session = Depends(get_ses
         name=payload.name,
         concept_markdown=payload.concept_markdown,
         body_markdown=payload.body_markdown,
-        asset_class=payload.asset_class,
-        timeframe=payload.timeframe,
         status=payload.status,
     )
     session.add(strategy)
@@ -950,25 +969,20 @@ class StrategySubmitPayload(BaseModel):
     name: str
     concept_markdown: str = ""  # general trading concept (ingested as context, REQUIRED input)
     body_markdown: str = ""  # synthesized entry criteria; manual entry textbox retired (#8)
-    asset_class: str = ""
     # Strategy is asset-agnostic by design. `symbol`/`timeframe` are optional
-    # backtest hints (the markdown states which timeframes it trades); the pipeline
-    # defaults to a representative basket when absent.
+    # synthesis hints (the markdown states which timeframes it trades); the
+    # pipeline defaults when absent.
     symbol: str | None = None
     timeframe: str | None = None
-    bars: int = 6000
-    max_iterations: int = 6
-    min_winrate: float = 55.0
-    min_sharpe: float = 1.0
     strategy_id: str | None = None
 
 
 @router.post("/strategies/submit")
 def submit_strategy(payload: StrategySubmitPayload):
-    """Auto pipeline: QA -> parameterize -> backtest/refine to best -> save.
+    """Auto pipeline: Synthesis -> QA -> finalize -> save.
 
     Returns a job_id to poll via GET /strategies/submit/{job_id}. Kept asynchronous
-    because QA + refinement involves several LLM calls and backtests."""
+    because synthesis + QA involve several LLM calls."""
     from app.services.strategy_pipeline import start
 
     job_id = start(payload.model_dump())
@@ -1001,45 +1015,11 @@ def update_strategy(strategy_id: str, payload: StrategyUpdatePayload,
 
 @router.post("/strategies/{strategy_id}/approve")
 def approve_strategy(strategy_id: str, session: Session = Depends(get_session)) -> Strategy:
-    """Promote a DRAFT strategy to ACTIVE and apply its best refined params."""
-    from app.services.strategy_pipeline import _metrics_green, _metrics_overfit_guard
-
+    """Promote a DRAFT strategy to ACTIVE. QA/PASS verdicts are already decided
+    by the synthesis pipeline; approval is a plain status flip."""
     strat = session.get(Strategy, strategy_id)
     if strat is None:
         raise HTTPException(404, "strategy not found")
-
-    best = session.exec(
-        select(BacktestRun)
-        .where(BacktestRun.strategy_id == strategy_id, BacktestRun.accepted.is_(1))
-        .order_by(BacktestRun.created_at.desc())
-    ).first()
-    if best is not None:
-        # Faithful code runs store {code, confluence}; apply both so the strategy
-        # keeps its executable rules + the scanner's confluence params.
-        try:
-            parsed_spec = json.loads(best.spec_json)
-        except (TypeError, ValueError):
-            parsed_spec = {}
-        code = parsed_spec.get("code") if isinstance(parsed_spec, dict) else None
-        confluence = (
-            parsed_spec.get("confluence")
-            if isinstance(parsed_spec, dict) and parsed_spec.get("confluence")
-            else parsed_spec
-        )
-        if code:
-            strat.strategy_code = code
-        strat.params_json = json.dumps(confluence or {})
-
-    # Approval gate: if the strategy has a best spec (went through the pipeline),
-    # all metrics must be green (anti-overfit) before it can go live. Strategies
-    # without a backtest are allowed through as plain rule-only setups.
-    if strat.params_json:
-        gate = _metrics_overfit_guard({
-            "train": json.loads(best.metrics_json or "{}").get("train", {}) if best else {},
-            "test": json.loads(best.metrics_json or "{}").get("test", {}) if best else {},
-        })
-        if not _metrics_green(gate):
-            raise HTTPException(409, "Not all metrics are green (possible overfit). Refine again.")
 
     strat.status = "active"
     session.add(strat)
@@ -1110,126 +1090,47 @@ def register_primitives(payload: PrimitiveRegisterPayload):
         raise HTTPException(400, f"Could not register primitives: {exc}") from exc
 
 
-# ---------- Backtest + AI refinement ----------
+# ---------- ML artifact context files ----------
 
-def _stored_spec(strat: Strategy) -> dict | None:
-    """Best refined spec applied to the strategy, if any."""
-    if not getattr(strat, "params_json", ""):
-        return None
+@router.get("/strategies/ml-artifacts")
+def list_ml_artifacts(symbol: str | None = None):
+    """Uploaded ML/model context files (optional per-symbol scope) that the
+    scanner consumes as context-only at scan time."""
+    from app.services.ml_artifact import list_artifacts
+
+    return {"artifacts": list_artifacts(symbol=symbol)}
+
+
+@router.post("/strategies/ml-artifacts")
+def upload_ml_artifact(filename: str, symbol: str | None = None,
+                       content: str = ""):
+    """Save one ML/model context file. ``filename`` must end in .txt/.md/.json
+    or .csv; ``symbol`` optionally scopes it to a specific asset."""
+    from app.services.ml_artifact import save
+
     try:
-        spec = json.loads(strat.params_json)
-        return spec if isinstance(spec, dict) and spec else None
-    except (TypeError, ValueError):
-        return None
-
-
-class BacktestPayload(BaseModel):
-    symbol: str
-    timeframe: str = "15m"
-    bars: int = 1500
-    spec: dict | None = None
-    start_date: str | None = None  # exact window (extracted dataset / live range)
-    end_date: str | None = None
-
-
-@router.post("/strategies/{strategy_id}/backtest")
-def run_backtest(strategy_id: str, payload: BacktestPayload,
-                 session: Session = Depends(get_session)):
-    from app.agents.strategy_codegen import StrategyCodeGen
-    from app.services.backtest_engine import BacktestEngine
-
-    strat = session.get(Strategy, strategy_id)
-    if strat is None:
-        raise HTTPException(404, "strategy not found")
-    try:
-        if not getattr(strat, "strategy_code", ""):
-            gen = StrategyCodeGen().generate(
-                strat.name, strat.concept_markdown or "", strat.body_markdown,
-                payload.symbol, payload.timeframe,
-            )
-            strat.strategy_code = gen.get("code") or ""
-            session.add(strat)
-            session.commit()
-            session.refresh(strat)
-        confluence = _stored_spec(strat) or {}
-        return BacktestEngine().run_code(
-            payload.symbol, payload.timeframe, strat.strategy_code,
-            payload.bars, confluence=confluence,
-            start_date=payload.start_date, end_date=payload.end_date,
-        )
+        return save(filename, content.encode("utf-8"), symbol=symbol)
     except ValueError as exc:
-        raise HTTPException(400, str(exc))
+        raise HTTPException(400, str(exc)) from exc
 
 
-class RefinePayload(BaseModel):
-    symbol: str
-    timeframe: str = "15m"
-    bars: int = 1500
-    max_iterations: int = 6
-    min_winrate: float = 50.0
-    min_sharpe: float = 1.0
-    start_date: str | None = None
-    end_date: str | None = None
+@router.get("/strategies/ml-artifacts/{artifact_id}")
+def get_ml_artifact(artifact_id: str):
+    from app.services.ml_artifact import contents
+
+    art = contents(artifact_id)
+    if art is None:
+        raise HTTPException(404, "ml artifact not found")
+    return art
 
 
-@router.post("/strategies/{strategy_id}/backtest/refine")
-def refine_backtest(strategy_id: str, payload: RefinePayload,
-                    session: Session = Depends(get_session)):
-    from app.agents.strategy_codegen import StrategyCodeGen
-    from app.services.backtest_engine import BacktestEngine
+@router.delete("/strategies/ml-artifacts/{artifact_id}")
+def delete_ml_artifact(artifact_id: str):
+    from app.services.ml_artifact import delete
 
-    strat = session.get(Strategy, strategy_id)
-    if strat is None:
-        raise HTTPException(404, "strategy not found")
-    if payload.max_iterations < 1:
-        raise HTTPException(400, "max_iterations must be >= 1")
-    try:
-        if not getattr(strat, "strategy_code", ""):
-            gen = StrategyCodeGen().generate(
-                strat.name, strat.concept_markdown or "", strat.body_markdown,
-                payload.symbol, payload.timeframe,
-            )
-            strat.strategy_code = gen.get("code") or ""
-            session.add(strat)
-            session.commit()
-            session.refresh(strat)
-        return BacktestEngine().refine_code_loop(
-            session, strat, payload.symbol, payload.timeframe,
-            strat.strategy_code, payload.bars, payload.max_iterations,
-            payload.min_winrate, payload.min_sharpe,
-            confluence=_stored_spec(strat) or {},
-            concept=strat.concept_markdown or "",
-            start_date=payload.start_date, end_date=payload.end_date,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-
-
-@router.get("/strategies/{strategy_id}/backtests")
-def list_backtests(strategy_id: str, limit: int = 100,
-                   session: Session = Depends(get_session)):
-    if session.get(Strategy, strategy_id) is None:
-        raise HTTPException(404, "strategy not found")
-    rows = session.exec(
-        select(BacktestRun)
-        .where(BacktestRun.strategy_id == strategy_id)
-        .order_by(BacktestRun.created_at.desc())
-        .limit(max(1, min(int(limit), 500)))
-    ).all()
-    return [
-        {
-            "id": r.id,
-            "iteration": r.iteration,
-            "symbol": r.symbol,
-            "timeframe": r.timeframe,
-            "spec": json.loads(r.spec_json or "{}"),
-            "metrics": json.loads(r.metrics_json or "{}"),
-            "rationale": r.rationale,
-            "accepted": bool(r.accepted),
-            "created_at": r.created_at.isoformat(),
-        }
-        for r in rows
-    ]
+    if not delete(artifact_id):
+        raise HTTPException(404, "ml artifact not found")
+    return {"ok": True}
 
 
 # ---------- Scans / Validations / Trades ----------
@@ -1698,124 +1599,3 @@ def risk_clearance(payload: RiskClearancePayload, session: Session = Depends(get
         sl=payload.sl,
     )
 
-
-# ---------- Datasets (Phase 8 Parquet Extraction) ----------
-
-class DatasetExtractPayload(BaseModel):
-    # ``None`` = the whole watchlist: every asset in the watchlist is extracted
-    # automatically, one Parquet dataset per symbol.
-    symbol: str | None = None
-    timeframe: str = "15m"
-    start_date: str | None = None  # YYYY-MM-DD (exact window, not a bar count)
-    end_date: str | None = None
-    asset_class: str = ""
-
-
-@router.get("/datasets")
-def list_datasets():
-    from app.services.dataset_service import DatasetService
-
-    return {"datasets": DatasetService().list_datasets()}
-
-
-@router.post("/datasets/extract")
-def extract_dataset(payload: DatasetExtractPayload,
-                    session: Session = Depends(get_session)):
-    """Extract historical OHLCV to Parquet for an EXACT date range.
-
-    Without a ``symbol`` the extraction runs across the whole watchlist
-    (every Asset row), returning ``{datasets, errors}`` so the UI can show
-    per-symbol results."""
-    from app.services.dataset_service import DatasetService
-
-    try:
-        svc = DatasetService()
-        if payload.symbol and payload.symbol.strip():
-            meta = svc.extract_dataset(
-                symbol=payload.symbol,
-                timeframe=payload.timeframe,
-                start_date=payload.start_date,
-                end_date=payload.end_date,
-                asset_class=payload.asset_class,
-            )
-            return {"datasets": [meta], "errors": []}
-        symbols = [a.symbol for a in session.exec(select(Asset)).all()]
-        return svc.extract_watchlist(
-            timeframe=payload.timeframe,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            asset_class=payload.asset_class,
-            symbols=symbols,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 - extraction failure is a client error
-        raise HTTPException(400, str(exc)) from exc
-
-
-@router.get("/datasets/{dataset_id}")
-def preview_dataset(dataset_id: str, limit: int = 50):
-    from app.services.dataset_service import DatasetService
-
-    try:
-        return DatasetService().preview_dataset(dataset_id, limit=limit)
-    except FileNotFoundError as exc:
-        raise HTTPException(404, f"dataset {dataset_id} not found") from exc
-
-
-@router.delete("/datasets/{dataset_id}")
-def delete_dataset(dataset_id: str):
-    from app.services.dataset_service import DatasetService
-
-    ok = DatasetService().delete_dataset(dataset_id)
-    if not ok:
-        raise HTTPException(404, f"dataset {dataset_id} not found")
-    return {"ok": True, "id": dataset_id}
-
-
-# ---------- ML Scanner — XGBoost (Phase 9) ----------
-
-@router.get("/ml/status")
-def ml_status():
-    from app.services.ml_scanner import status as ml_status_fn
-
-    return ml_status_fn()
-
-
-@router.post("/ml/train")
-def ml_train(session: Session = Depends(get_session)):
-    """Trigger a (blocking) retrain of the XGBoost scanner model.
-
-    Only trains on strategies that passed the full QA gate (active status,
-    accepted BacktestRun). Returns train/test accuracy and metadata.
-    """
-    import threading
-
-    from app.services import ml_scanner
-
-    result_holder: dict = {}
-    lock = threading.Event()
-
-    def _bg():
-        result_holder["result"] = ml_scanner.train(session)
-        lock.set()
-
-    t = threading.Thread(target=_bg, daemon=True)
-    t.start()
-    lock.wait(timeout=300)  # max 5 minutes for training
-    result = result_holder.get("result", {"ok": False, "error": "Training timed out"})
-    if not result.get("ok"):
-        raise HTTPException(400, result.get("error", "Training failed"))
-    return result
-
-
-@router.delete("/ml/model")
-def ml_reset():
-    """Delete the persisted XGBoost model (forces a retrain before next use)."""
-    from app.services.ml_scanner import MODEL_PATH
-
-    deleted = False
-    if MODEL_PATH.exists():
-        MODEL_PATH.unlink()
-        deleted = True
-    return {"ok": True, "deleted": deleted}

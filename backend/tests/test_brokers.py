@@ -102,8 +102,8 @@ def test_agents_status_reports_active_agents(client):
     }), patch("app.services.agent_status._providers_status", return_value=[]), \
             patch("app.services.agent_status.get_agent_model", side_effect=lambda a: {
                 "scanner": "qwen2.5:3b", "validator": "qwen2.5:7b",
-                "qa": "qwen2.5:7b", "refiner": "qwen2.5:7b",
-                "refinement": "qwen2.5:7b", "regime": "indicator-based",
+                "qa": "qwen2.5:7b", "synthesizer": "qwen2.5:7b",
+                "regime": "indicator-based",
                 "news": "qwen2.5:7b",
             }.get(a, "")):
         r = client.get("/api/agents/status")
@@ -111,7 +111,7 @@ def test_agents_status_reports_active_agents(client):
     data = r.json()
     assert "agents" in data
     ids = {a["id"] for a in data["agents"]}
-    assert {"scanner", "validator", "qa", "refinement"} <= ids
+    assert {"scanner", "validator", "qa", "risk_manager"} <= ids
     scanner = next(a for a in data["agents"] if a["id"] == "scanner")
     assert scanner["ready"] is True
     assert scanner["model"] == "qwen2.5:3b"

@@ -24,3 +24,15 @@ class VaultService:
     @staticmethod
     def has(namespace: str, username: str) -> bool:
         return VaultService.get(namespace, username) is not None
+
+    @staticmethod
+    def redact(secret: str | None, keep: int = 4) -> str:
+        """Mask a secret for display: reveal only the first and last ``keep``
+        characters, filling the middle with bullets. Empty when nothing is
+        stored, so the UI can distinguish "no key" from "key stored".
+        """
+        if not secret:
+            return ""
+        if len(secret) <= keep * 2:
+            return "•" * len(secret)
+        return f"{secret[:keep]}{'•' * 6}{secret[-keep:]}"

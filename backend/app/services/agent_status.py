@@ -82,24 +82,17 @@ def agent_status() -> dict:
         return "Cloud chain → Ollama fallback"
 
     agents = []
-    for agent_id in ("xgb_scanner", "scanner", "validator", "risk_manager", "refinement", "qa", "news", "regime"):
+    for agent_id in ("scanner", "validator", "risk_manager", "qa", "news", "regime"):
         entry = catalog.get(agent_id, {})
         name = entry.get("name", agent_id)
         role = entry.get("role", "")
 
-        if agent_id == "xgb_scanner":
-            from app.services.ml_scanner import status as ml_status
-            ml = ml_status()
-            model = "xgboost-2.x"
-            ready = ml.get("status") == "ready"
-            note = ml.get("error") or ("model trained — " + str(ml.get("trained_at") or "")[:19] if ready else "not trained yet — call POST /api/ml/train")
-            label = "XGBoost (local, deterministic)"
-        elif agent_id == "scanner":
+        if agent_id == "scanner":
             model = get_agent_model("scanner") or ollama["scanner_model"]
             ready = ollama_ready
             note = "Ollama unreachable" if not ollama["reachable"] else (
-                "no scanner model selected" if not ollama["scanner_model"] else "fallback — active when XGBoost not trained")
-            label = "Ollama (local) — XGBoost fallback"
+                "no scanner model selected" if not ollama["scanner_model"] else "local LLM scanner (raw chat)")
+            label = "Ollama (local LLM)"
         elif agent_id == "regime":
             model = get_agent_model("regime") or "indicator-based"
             ready = True

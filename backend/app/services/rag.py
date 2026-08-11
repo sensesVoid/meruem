@@ -64,8 +64,6 @@ class RagService:
             documents=[text],
             metadatas=[{
                 "name": strategy.name,
-                "asset_class": strategy.asset_class,
-                "timeframe": strategy.timeframe,
                 "status": strategy.status,
             }],
             embeddings=[vector],

@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlmodel import Session, select
 
-from app.models.entities import BacktestRun, Scan, Trade, Validation
+from app.models.entities import Scan, Trade, Validation
 from app.services.settings_service import SettingsService
 
 
@@ -56,15 +56,6 @@ class DataCleanupService:
             self.session.delete(t)
         if old_closed:
             deleted["closed_trades"] = len(old_closed)
-
-        # Old backtest runs keep the library lean.
-        old_backtests = self.session.exec(
-            select(BacktestRun).where(BacktestRun.created_at < cutoff)
-        ).all()
-        for b in old_backtests:
-            self.session.delete(b)
-        if old_backtests:
-            deleted["backtest_runs"] = len(old_backtests)
 
         if not dry_run:
             self.session.commit()
