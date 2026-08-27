@@ -81,11 +81,12 @@ class Orchestrator:
 
         indicators = self._compute_indicators(ohlcv, strategies)
         from app.services.ml_artifact import context_for as ml_context_for
+        from app.services.qimera_adapter import context_for as qimera_context_for
 
         candidate = self.scanner.scan(
             ohlcv, indicators, [self._rule_pack(s) for s in strategies],
             references=references,
-            ml_context=ml_context_for(asset.symbol))
+            ml_context=ml_context_for(asset.symbol) + qimera_context_for(asset.symbol))
         candidate = self.scanner.normalize(candidate)
 
         # Persist concrete references to the approved strategies the scan used

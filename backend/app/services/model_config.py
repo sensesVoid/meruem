@@ -22,7 +22,7 @@ _cache: dict[str, tuple[float, object | None]] = {}
 _MODEL_KEYS: dict[str, object] = {
     "ollama_url": cfg.ollama_url,
     "ollama_scanner_model": cfg.ollama_scanner_model,
-    "ollama_validator_model": "qwen2.5:7b-instruct",
+    "ollama_validator_model": "qwen3:4b",
 }
 
 # Default provider list used when no `llm_providers` setting row exists.
@@ -94,9 +94,9 @@ AGENT_CATALOG: list[dict] = [
         "role": "Scans the market for potential entry setups.",
         "engine": "local",
         "refresh": "5 min / on click",
-        "default_model": "qwen2.5:3b-instruct",
-        "recommended_model": "qwen2.5:7b-instruct",
-        "tip": "Fast, disciplined setup detector. A small local model (qwen2.5:3b/7b) is plenty; it only reads indicators + rules.",
+        "default_model": "qwen3:4b",
+        "recommended_model": "qwen3:4b",
+        "tip": "Fast, disciplined setup detector. A compact local model (qwen3:4b) is plenty; it only reads indicators + rules.",
     },
     {
         "id": "validator",
@@ -114,8 +114,8 @@ AGENT_CATALOG: list[dict] = [
         "role": "Filters market regime: trend direction, trend strength, volatility, momentum/exhaustion, breadth.",
         "engine": "local",
         "refresh": "5 min",
-        "default_model": "qwen2.5:3b-instruct",
-        "recommended_model": "qwen2.5:7b-instruct",
+        "default_model": "qwen3:4b",
+        "recommended_model": "qwen3:4b",
         "tip": "Currently indicator-driven, not LLM. Model only used if enrolled in the LLM chain in a future phase.",
     },
     {

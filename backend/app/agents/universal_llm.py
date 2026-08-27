@@ -88,7 +88,7 @@ class UniversalLLM:
                 return c
         if installed:
             return installed[0]
-        return model_get("ollama_validator_model") or "qwen2.5:7b-instruct"
+        return model_get("ollama_validator_model") or "qwen3:4b"
 
     def generate(self, prompt: str, temperature: float = 0.1) -> tuple[str, str]:
         """Honour the per-agent model, chain the providers, fall back to Ollama.

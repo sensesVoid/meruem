@@ -5,6 +5,8 @@ import pytest
 
 _tmp = tempfile.mkdtemp(prefix="meruem_test_")
 os.environ["MERUEM_DATABASE_URL"] = f"sqlite:///{os.path.join(_tmp, 'test.db')}"
+# The suite must never probe the network: disable the launch-time Ollama detector.
+os.environ["MERUEM_OLLAMA_DETECT_ON_LAUNCH"] = "false"
 
 
 @pytest.fixture(autouse=True)

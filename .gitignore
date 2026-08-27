@@ -16,8 +16,11 @@ frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo
 
-# Tauri
-src-tauri/target/
+# QiMera extension (research/optimization subproject)
+qimera/data/
+qimera/frontend/node_modules/
+qimera/frontend/dist/
+qimera/logs/
 
 # Env
 .env
@@ -33,4 +36,4 @@ PRD.md
 LIVETEST.md
 evolution.md
 evolution-plan.md
-other-proj.md
+QiMera.md

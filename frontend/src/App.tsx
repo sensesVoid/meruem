@@ -60,7 +60,7 @@ export default function App() {
 
         <section className="min-h-0">
           {tab === "chart" && (
-            <ChartPanel symbol={active?.symbol ?? "XAUUSD"} onSelectAsset={setActive} />
+            <ChartPanel symbol={active?.symbol ?? "EURUSD"} onSelectAsset={setActive} />
           )}
           {tab === "signals" && <SignalsPanel />}
           {tab === "trades" && <TradesPanel />}

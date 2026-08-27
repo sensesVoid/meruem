@@ -12,7 +12,9 @@ const MODES = [
   ["risk_pct", "Risk % of equity"],
 ];
 
-type ExchangeId = "MT5" | "Binance" | "MEXC";
+// MT5-only platform (Prop Firm management). Binance / MEXC are parked for now;
+// Binance PUBLIC market-data flow is unaffected (market_data uses the public API).
+type ExchangeId = "MT5"; // | "Binance" | "MEXC";
 
 const defaultForm = {
   exchange: "MT5" as ExchangeId,
@@ -232,7 +234,7 @@ const load = async () => {
 
         {/* Step 1 — exchange */}
         <div className="mb-3 flex flex-wrap gap-2">
-          {(["MT5", "Binance", "MEXC"] as ExchangeId[]).map((ex) => (
+          {(["MT5"] as ExchangeId[]).map((ex) => (
             <button
               key={ex}
               type="button"
@@ -247,6 +249,8 @@ const load = async () => {
               {ex === "MT5" ? "MetaTrader 5" : ex === "Binance" ? "Binance" : "MEXC"}
             </button>
           ))}
+          {/* Binance / MEXC exchange buttons are commented out for now (MT5-only). */}
+          {/* {(["MT5", "Binance", "MEXC"] as ExchangeId[]).map((ex) => ( ... ))} */}
         </div>
 
         {/* Step 2 — role */}

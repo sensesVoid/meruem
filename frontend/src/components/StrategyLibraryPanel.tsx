@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, Asset, Strategy, StrategyPipelineJob } from "@/lib/api";
+import { api, Strategy, StrategyPipelineJob } from "@/lib/api";
 import {
   setFinalizeHandler,
   startPoll,
@@ -9,11 +9,9 @@ import {
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input, Select, Textarea } from "@/components/ui/input";
+import { Input, Textarea } from "@/components/ui/input";
 import { SynthesisDiagnostics } from "@/components/SynthesisDiagnostics";
 import { MLArtifactUpload } from "@/components/MLArtifactUpload";
-
-const TIMEFRAMES = ["1m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "1D", "1W", "1M"];
 
 const CONCEPT_TEMPLATE = `Concepts / Thesis:
   Trade the buy-side liquidity sweep that leaves a fair value gap, in the direction of the higher-timeframe trend.
@@ -100,9 +98,6 @@ export function StrategyLibraryPanel() {
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
-  const [assets, setAssets] = useState<Asset[]>([]);
-  const [symbol, setSymbol] = useState("EURUSD");
-  const [tf, setTf] = useState("5m");
 
   const clearForm = () => {
     setName("");
@@ -124,11 +119,6 @@ export function StrategyLibraryPanel() {
   };
   useEffect(() => {
     load();
-  }, []);
-  useEffect(() => {
-    api.get<Asset[]>("/assets").then((list) => {
-      setAssets(list);
-    }).catch(() => {});
   }, []);
   // Polling lives at module scope so synthesis keeps running (and is re-observable)
   // when the user switches tabs. Subscribe here to mirror the active job into state;
@@ -179,8 +169,6 @@ export function StrategyLibraryPanel() {
         concept_markdown: concept,
         body_markdown: body,
         strategy_id: strategyId ?? null,
-        symbol,
-        timeframe: tf,
       });
       startPoll(job_id);
     } catch (e) {
@@ -289,15 +277,6 @@ export function StrategyLibraryPanel() {
       <>
           <div className="mb-3 space-y-1.5 rounded-md border border-meruem-border p-2">
             <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Strategy name" />
-            <div className="flex flex-wrap items-end gap-1.5">
-              <Select value={symbol} onChange={(e) => setSymbol(e.target.value)} className="w-24" title="Symbol hint for synthesis (entry criteria are kept symbol-agnostic)">
-                {assets.map((a) => <option key={a.id} value={a.symbol}>{a.symbol}</option>)}
-                {assets.length === 0 && <option value="EURUSD">EURUSD</option>}
-              </Select>
-              <Select value={tf} onChange={(e) => setTf(e.target.value)} className="w-20" title="Timeframe hint for synthesis">
-                {TIMEFRAMES.map((t) => <option key={t} value={t}>{t}</option>)}
-              </Select>
-            </div>
             <div className="flex items-center justify-between">
               <p className="text-[10px] font-semibold uppercase tracking-wide text-meruem-muted">Trading concept</p>
               <Button

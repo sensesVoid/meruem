@@ -47,8 +47,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         },
     ],
     "ollama_url": "http://127.0.0.1:11434",
-    "ollama_scanner_model": "qwen2.5:3b-instruct",
-    "ollama_validator_model": "qwen2.5:7b-instruct",
+    "ollama_scanner_model": "qwen3:4b",
+    "ollama_validator_model": "qwen3:4b",
     "tp_config": {
         "tp1": 1.0,
         "tp2": 2.0,

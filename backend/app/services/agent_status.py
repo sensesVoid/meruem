@@ -57,6 +57,8 @@ def _providers_status() -> list[dict]:
 
 
 def agent_status() -> dict:
+    from app.services.ollama_discovery import latest_report
+
     ollama = _ollama_status()
     providers = _providers_status()
     cloud_ready = any(p["ready"] for p in providers)
@@ -110,4 +112,5 @@ def agent_status() -> dict:
         "providers": providers,
         "agents": agents,
         "cloud_ready": cloud_ready,
+        "ollama_discovery": latest_report(),
     }

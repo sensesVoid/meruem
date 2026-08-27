@@ -37,7 +37,7 @@ def test_every_agent_has_recommendation_and_tip():
 
 
 def test_get_agent_model_defaults_from_catalog():
-    assert get_agent_model("scanner") == "qwen2.5:3b-instruct"
+    assert get_agent_model("scanner") == "qwen3:4b"
     assert get_agent_model("validator") == "gemini-3.5-flash-lite"
 
 
@@ -96,8 +96,8 @@ def test_settings_round_trip_updates_catalog(client):
     finally:
         client.put("/api/settings", json={"key": "agent_models", "value": {}})
         mc._cache.clear()
-        # no override -> falls back to legacy ollama_scanner_model setting
-        assert get_agent_model("scanner") == "qwen2.5:3b-instruct"
+        # no override -> falls back through legacy setting to the catalog default
+        assert get_agent_model("scanner") == "qwen3:4b"
 
 
 def test_agent_status_reflects_assigned_model(client, monkeypatch):

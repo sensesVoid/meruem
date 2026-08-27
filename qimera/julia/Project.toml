@@ -1,0 +1,10 @@
+name = "QiMera"
+uuid = "8d1f4436-7880-4295-9c50-9e896669ffdc"
+authors = ["Gerald Aton"]
+version = "0.1.0"
+
+[deps]
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+
+[compat]
+julia = "1.10"

@@ -142,6 +142,14 @@ def agents_status():
     return agent_status()
 
 
+@router.get("/qimera/status")
+def qimera_status():
+    """QiMera extension status: link target, reachability, injected manifests."""
+    from app.services.qimera_adapter import status
+
+    return status()
+
+
 @router.get("/agents/catalog")
 def agents_catalog():
     """Agent catalog with per-agent assigned model + recommended models (task #12)."""
@@ -304,7 +312,7 @@ class MT5Connect(BaseModel):
     password: str
 
 
-class BinanceConnect(BaseModel):
+class BinanceConnect(BaseModel):  # pragma: no cover - parked: MT5-only platform
     api_key: str
     secret: str
 
@@ -334,30 +342,31 @@ def _test_broker(payload: BrokerConnect) -> tuple[bool, str]:
                 "MetaTrader5 not initialized / terminal not running, or login/server rejected")
         except Exception as exc:  # noqa: BLE001
             return False, f"{type(exc).__name__}: {exc}"
-    if payload.broker == "Binance":
-        try:
-            import ccxt
-
-            ex = ccxt.binance({"apiKey": payload.api_key, "secret": payload.secret})
-            ex.fetch_time()
-            if payload.api_key:
-                ex.fetch_balance()
-            return True, "Binance reachable, API credentials accepted"
-        except Exception as exc:  # noqa: BLE001
-            return False, f"{type(exc).__name__}: {exc}"
-    if payload.broker == "MEXC":
-        try:
-            from app.services.mexc_adapter import MEXCAdapter
-
-            adapter = MEXCAdapter()
-            ok = adapter.connect(payload.api_key, payload.secret)
-            return (
-                (True, "MEXC reachable, API credentials accepted")
-                if ok
-                else (False, "MEXC unreachable or API credentials rejected")
-            )
-        except Exception as exc:  # noqa: BLE001
-            return False, f"{type(exc).__name__}: {exc}"
+    # Binance / MEXC broker branches are commented out — MT5-only platform.
+    # if payload.broker == "Binance":
+    #     try:
+    #         import ccxt
+    #
+    #         ex = ccxt.binance({"apiKey": payload.api_key, "secret": payload.secret})
+    #         ex.fetch_time()
+    #         if payload.api_key:
+    #             ex.fetch_balance()
+    #         return True, "Binance reachable, API credentials accepted"
+    #     except Exception as exc:  # noqa: BLE001
+    #         return False, f"{type(exc).__name__}: {exc}"
+    # if payload.broker == "MEXC":
+    #     try:
+    #         from app.services.mexc_adapter import MEXCAdapter
+    #
+    #         adapter = MEXCAdapter()
+    #         ok = adapter.connect(payload.api_key, payload.secret)
+    #         return (
+    #             (True, "MEXC reachable, API credentials accepted")
+    #             if ok
+    #             else (False, "MEXC unreachable or API credentials rejected")
+    #         )
+    #     except Exception as exc:  # noqa: BLE001
+    #         return False, f"{type(exc).__name__}: {exc}"
     return False, "unsupported broker"
 
 
@@ -480,25 +489,28 @@ def broker_mt5_test(payload: MT5Connect):
         return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
 
 
-@router.post("/brokers/binance/connect")
-def broker_binance_connect(payload: BinanceConnect):
-    VaultService.save("binance", "default", payload.api_key)
-    VaultService.save("binance", "default:secret", payload.secret)
-    return {"ok": True}
-
-
-@router.post("/brokers/binance/test")
-def broker_binance_test(payload: BinanceConnect):
-    try:
-        import ccxt
-
-        ex = ccxt.binance({"apiKey": payload.api_key, "secret": payload.secret})
-        ex.fetch_time()  # public reachability
-        if payload.api_key:
-            ex.fetch_balance()
-        return {"ok": True, "detail": "Binance reachable, API credentials accepted"}
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+# Binance broker routes are commented out for now (MT5-only platform). The
+# Binance PUBLIC data flow stays live — it lives in market_data.py and needs
+# no credentials.
+# @router.post("/brokers/binance/connect")
+# def broker_binance_connect(payload: BinanceConnect):
+#     VaultService.save("binance", "default", payload.api_key)
+#     VaultService.save("binance", "default:secret", payload.secret)
+#     return {"ok": True}
+#
+#
+# @router.post("/brokers/binance/test")
+# def broker_binance_test(payload: BinanceConnect):
+#     try:
+#         import ccxt
+#
+#         ex = ccxt.binance({"apiKey": payload.api_key, "secret": payload.secret})
+#         ex.fetch_time()  # public reachability
+#         if payload.api_key:
+#             ex.fetch_balance()
+#         return {"ok": True, "detail": "Binance reachable, API credentials accepted"}
+#     except Exception as exc:  # noqa: BLE001
+#         return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
 
 
 @router.get("/brokers/status")

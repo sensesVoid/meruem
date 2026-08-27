@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "features": [
+    {
+      "id": "atr_normalized",
+      "name": "Normalized Volatility (ATR)",
+      "type": "primitive",
+      "function_name": "atr_normalized",
+      "parameters": {
+        "period": {
+          "type": "integer",
+          "default": 14,
+          "description": "Period for Average True Range computation."
+        }
+      },
+      "output_range": [-1.0, 1.0],
+      "description": "Average True Range divided by close price and scaled via tanh to represent volatility relative to price levels.",
+      "provenance": null
+    },
+    {
+      "id": "rolling_volume_norm",
+      "name": "Normalized Rolling Volume",
+      "type": "primitive",
+      "function_name": "rolling_volume_norm",
+      "parameters": {
+        "period": {
+          "type": "integer",
+          "default": 20,
+          "description": "Period for the volume rolling average."
+        }
+      },
+      "output_range": [-1.0, 1.0],
+      "description": "Asset volume normalized relative to its rolling average and scaled via robust tanh.",
+      "provenance": null
+    },
+    {
+      "id": "price_momentum",
+      "name": "Price Momentum",
+      "type": "primitive",
+      "function_name": "price_momentum_norm",
+      "parameters": {
+        "period": {
+          "type": "integer",
+          "default": 14,
+          "description": "Return period in bars."
+        }
+      },
+      "output_range": [-1.0, 1.0],
+      "description": "Normalized percentage price return over period scaled via tanh.",
+      "provenance": null
+    },
+    {
+      "id": "fvg_gaps",
+      "name": "Fair Value Gaps (FVG)",
+      "type": "building_block",
+      "function_name": "detect_fvgs",
+      "parameters": {
+        "atr_period": {
+          "type": "integer",
+          "default": 14,
+          "description": "ATR period for gap size scaling."
+        }
+      },
+      "output_range": [-1.0, 1.0],
+      "description": "Bullish and Bearish Fair Value Gaps computed as displacement size relative to ATR, scaled via tanh.",
+      "provenance": null
+    },
+    {
+      "id": "anchored_vwap_dist",
+      "name": "Anchored VWAP Distance",
+      "type": "building_block",
+      "function_name": "compute_anchored_vwap",
+      "parameters": {},
+      "output_range": [-1.0, 1.0],
+      "description": "Percentage distance of closing price from the Anchored VWAP (which resets at session boundaries), scaled via tanh.",
+      "provenance": null
+    },
+    {
+      "id": "liquidity_sweeps",
+      "name": "Liquidity Sweeps",
+      "type": "building_block",
+      "function_name": "detect_liquidity_sweeps",
+      "parameters": {
+        "lookback": {
+          "type": "integer",
+          "default": 20,
+          "description": "Lookback window in bars to define liquidity highs/lows."
+        }
+      },
+      "output_range": [-1.0, 1.0],
+      "description": "Identifies sweeps of historical swing highs and lows that fail to close outside the range, scaled via tanh.",
+      "provenance": null
+    },
+    {
+      "id": "order_blocks_proximity",
+      "name": "Order Block Proximity",
+      "type": "building_block",
+      "function_name": "order_blocks_proximity",
+      "parameters": {
+        "period": {
+          "type": "integer",
+          "default": 20,
+          "description": "Volume moving average period for OB classification."
+        }
+      },
+      "output_range": [-1.0, 1.0],
+      "description": "Proximity of current price to active high-volume order blocks, with exponential decay over time.",
+      "provenance": null
+    }
+  ]
+}

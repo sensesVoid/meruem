@@ -57,7 +57,7 @@ export function RiskPanel() {
   const [error, setError] = useState<string | null>(null);
 
   // Clearance test form
-  const [testSymbol, setTestSymbol] = useState("XAUUSD");
+  const [testSymbol, setTestSymbol] = useState("EURUSD");
   const [testDirection, setTestDirection] = useState("BUY");
   const [testEntry, setTestEntry] = useState("2650.00");
   const [testSL, setTestSL] = useState("2640.00");

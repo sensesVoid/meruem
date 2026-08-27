@@ -1,6 +1,6 @@
 # Meruem — AI-Agentic Trading Desktop
 
-Local-first automated trading terminal: a Tauri desktop shell wrapping a React + Vite frontend and a FastAPI sidecar, driven by a multi-agent AI pipeline.
+Local-first automated trading terminal: a React + Vite frontend and a FastAPI backend, driven by a multi-agent AI pipeline.
 
 The workflow is concept-in, trades-out: ingest trading concepts → synthesize executable entry strategies strictly grounded in them → pass a merged QA gate (deterministic + LLM self-check) → scan a watchlist for live setups → AI-validate every signal → block unsafe trades with live risk interception → copy accepted trades from a master account to slave accounts across MT5 / Binance / MEXC.
 
@@ -21,10 +21,9 @@ The workflow is concept-in, trades-out: ingest trading concepts → synthesize e
 
 | Layer | Tech |
 |-------|------|
-| Desktop shell | Tauri 2.x (Rust) |
 | Frontend | React 18 + TypeScript + Tailwind CSS + Vite |
 | Charting | `lightweight-charts` (TradingView MIT) |
-| Backend | FastAPI + Uvicorn sidecar on `127.0.0.1:8765` |
+| Backend | FastAPI + Uvicorn on `127.0.0.1:8765` |
 | Database | SQLite via SQLModel (8 tables) |
 | AI | Local Ollama scanner → configurable cloud validator chain (Gemini → Groq → DeepSeek → Ollama) |
 | RAG | ChromaDB + `sentence-transformers` (keyword-search fallback without ChromaDB) |
@@ -51,7 +50,8 @@ backend/
 frontend/
   src/           React app: 9 tab panels, chart, api client
   vite.config.ts proxies /api -> 127.0.0.1:8765
-src-tauri/       Rust shell (requires Rust toolchain to build)
+qimera/          QiMera research/optimization extension (own API 8766 + UI 1421);
+                 exports artifacts injected into Meruem's scanner context
 start.ps1        Launches backend + frontend together
 setup.ps1        One-shot environment setup
 ```
@@ -60,8 +60,7 @@ setup.ps1        One-shot environment setup
 
 - Python 3.12+
 - Node 20+ / npm
-- Rust toolchain (only needed to build the Tauri desktop shell — not required to run `start.ps1` in a browser)
-- [Ollama](https://ollama.com) with a local model for the scanner (default `qwen2.5:3b-instruct`)
+- [Ollama](https://ollama.com) with a local model for the scanner (default `qwen3:4b`)
 
 ## Setup
 
@@ -103,6 +102,16 @@ npm approve-scripts esbuild     # if allowed-scripts blocks the esbuild postinst
 
 Open http://localhost:1420 in a browser. If the top bar shows `BACKEND OFFLINE`, the backend isn't running.
 
+### QiMera research extension
+
+[QiMera] is the offline feature/parameter research + optimization terminal that ships with this repo as the `qimera/` subproject. It runs **separately** from Meruem (its own API on `8766`, its own UI on `1421`) and is opened via the **QiMera↗** link in Meruem's top bar (new browser tab). Its exported artifacts are injected into Meruem's per-symbol ML-artifact store and flow into the scanner as read-only context.
+
+Heavy computation (GP-style fitness / sweep features) runs in **Julia** via `juliacall` — one-time setup: `winget install Julialang.Juliaup` then `pip install juliacall`. Without Julia the QiMera API and Meruem scans degrade gracefully (same cache ignore rules apply).
+
+```powershell
+.\qimera\start.ps1     # QiMera API (8766) + UI (1421) together
+```
+
 ### UI panels
 
 | Tab | What it does |
@@ -116,12 +125,6 @@ Open http://localhost:1420 in a browser. If the top bar shows `BACKEND OFFLINE`,
 | **Strategies** | Strategy library + synthesis: ingest concepts, run the pipeline (Synthesis → QA → finalize), view the QA gate verdict, proxy parameters, diagnostics and the synthesized entry |
 | **Vault** | API keys for LLM providers + per-agent model assignment (locked fields with explicit save) |
 
-Desktop shell (once Rust is installed):
-
-```powershell
-cd frontend; npm run tauri dev
-```
-
 ## Configuration
 
 Backend config is read from environment variables (`backend/.env`, prefix `MERUEM_`):
@@ -132,7 +135,7 @@ Backend config is read from environment variables (`backend/.env`, prefix `MERUE
 | `MERUEM_HOST` / `MERUEM_PORT` | `127.0.0.1` / `8765` | API bind address |
 | `MERUEM_GEMINI_API_KEY` / `MERUEM_GROQ_API_KEY` | — | Cloud validator providers |
 | `MERUEM_OLLAMA_URL` | `http://127.0.0.1:11434` | Local LLM endpoint |
-| `MERUEM_OLLAMA_SCANNER_MODEL` | `qwen2.5:3b-instruct` | Local scanner model |
+| `MERUEM_OLLAMA_SCANNER_MODEL` | `qwen3:4b` | Local scanner model |
 | `MERUEM_SCAN_INTERVAL_SECONDS` | `300` | Auto-scan cadence |
 | `MERUEM_DATA_RETENTION_DAYS` | `90` | Cleanup retention |
 | `MERUEM_LTR_REVIEW_THRESHOLD` | `10` | Losing trades before auto-review |

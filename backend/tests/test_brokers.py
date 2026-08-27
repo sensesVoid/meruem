@@ -43,12 +43,18 @@ def test_connect_persists_account_and_single_master(session, client):
             "server": "Srv", "password": "pw",
         })
         r2 = client.post("/api/brokers/connect", json={
+            "broker": "MT5", "account_type": "master", "login": "222",
+            "server": "Srv", "password": "pw",
+        })
+        r3 = client.post("/api/brokers/connect", json={
             "broker": "Binance", "account_type": "master", "api_key": "k2",
             "secret": "s2", "login": "acc2",
         })
     assert r1.status_code == 200
     assert r1.json()["ok"] is True
     assert r2.json()["ok"] is True
+    # Binance is parked (MT5-only platform) -> rejected with 400
+    assert r3.status_code == 400
 
     # only one master remains among all accounts
     from app.models.entities import Account

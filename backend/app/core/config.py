@@ -26,7 +26,10 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
     ollama_url: str = "http://127.0.0.1:11434"
-    ollama_scanner_model: str = "qwen2.5:3b-instruct"
+    ollama_scanner_model: str = "qwen3:4b"
+    # Auto-detect the Ollama endpoint + installed models at launch (best-effort,
+    # non-blocking). Off in tests so the suite never probes the network.
+    ollama_detect_on_launch: bool = True
 
     scan_interval_seconds: int = 300
     data_retention_days: int = 90
@@ -34,6 +37,13 @@ class Settings(BaseSettings):
     # LTR automation: auto-review once this many losing trades are pending.
     ltr_review_threshold: int = 10
     ltr_check_interval_seconds: int = 3600
+
+    # QiMera extension (research/optimization subproject, runs separately).
+    # https://127.0.0.1:1421 is its web UI; the export store's directory feeds
+    # the QiMera manifests into the scanner's per-symbol ML-artifact context.
+    qimera_url: str = "http://127.0.0.1:1421"
+    qimera_api_url: str = "http://127.0.0.1:8766/api"
+    qimera_export_dir: str = ""  # empty = <repo>/qimera/data/export
 
     class Config:
         env_file = str(BACKEND_DIR / ".env")

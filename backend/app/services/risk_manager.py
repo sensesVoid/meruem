@@ -11,6 +11,7 @@ the shared risk-pct / proportional / fixed lot formulas so the clearance and the
 plan are the single authoritative sizing source.
 """
 
+import threading
 from datetime import datetime, timezone
 
 from sqlmodel import Session, func, select
@@ -21,6 +22,13 @@ from app.services.risk_interceptor import RiskInterceptor
 from app.services.settings_service import SettingsService
 
 PIP_VALUE = 10.0  # value per 0.0001 move for a 1.0 lot (orchestrator-consistent)
+
+# The deterministic plan is recomputed cheaply per request, but the LLM advisory
+# (the "Risk Manager agent" narrative) is only regenerated — and the served plan
+# only "refreshed" — when a MATERIAL value it reflects changes (equity, exposure,
+# risk settings). Tab switches therefore never spin the agent; a capital change does.
+_plan_cache_lock = threading.Lock()
+_plan_cache: dict = {"fingerprint": None, "plan": None}
 
 
 class RiskManager:
@@ -34,7 +42,13 @@ class RiskManager:
     # ---------------------------------------------------------------- plan
 
     def plan(self, symbol: str | None = None) -> dict:
-        """Full risk plan: guardrail verdict, exposure, accounts, lot sizing."""
+        """Full risk plan: guardrail verdict, exposure, accounts, lot sizing.
+
+        Deterministic parts are always recomputed so the plan reflects the latest
+        equity/exposure. The expensive LLM advisory is served from cache when the
+        material fingerprint is unchanged, so merely opening the tab again costs
+        nothing and only a capital change triggers a genuine agent refresh.
+        """
         cfg = self.settings.get_all()
         decision = self.interceptor.evaluate()
         accounts = self._enabled_accounts()
@@ -51,8 +65,40 @@ class RiskManager:
             "accounts": accounts,
             "lots": self._size_default(accounts),
         }
+
+        fingerprint = self._fingerprint(plan)
+        with _plan_cache_lock:
+            cached = _plan_cache.get("plan")
+            if cached is not None and _plan_cache.get("fingerprint") == fingerprint:
+                return cached
+
         plan["advisory"] = self._advisory(plan)
+
+        with _plan_cache_lock:
+            _plan_cache["fingerprint"] = fingerprint
+            _plan_cache["plan"] = plan
         return plan
+
+    @staticmethod
+    def _fingerprint(plan: dict) -> str:
+        """Stable id of the values the plan + advisory actually reflect."""
+        exposure = plan.get("exposure") or {}
+        parts = [
+            plan["decision"].get("allowed"),
+            plan["decision"].get("reason", ""),
+            round(plan.get("equity") or 0.0, 2),
+            exposure.get("open_all"),
+            exposure.get("open_auto"),
+            exposure.get("max_concurrent"),
+            plan.get("risk_pct"),
+            plan.get("lot_mode"),
+        ]
+        for acc in plan.get("accounts") or []:
+            parts += [
+                acc.get("id"), acc.get("type"), acc.get("mode"),
+                acc.get("scale"), round(acc.get("equity") or 0.0, 2),
+            ]
+        return "|".join(str(p) for p in parts)
 
     def clearance(self, account_id: str | None = None,
                   symbol: str = "", direction: str = "BUY",

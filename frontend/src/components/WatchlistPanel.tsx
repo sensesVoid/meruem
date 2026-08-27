@@ -83,7 +83,7 @@ export function WatchlistPanel({ active, onSelect }: WatchlistPanelProps) {
       </div>
 
       <div className="mt-3 space-y-1.5 border-t border-meruem-border pt-2">
-        <Input value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="Symbol e.g. XAUUSD" />
+        <Input value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="Symbol e.g. EURUSD" />
         <div className="flex gap-1.5">
           <select
             value={klass}

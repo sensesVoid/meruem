@@ -15,28 +15,29 @@ from app.services.broker_adapters import (
 from app.services.copier import CopierEngine
 
 
-def test_registry_lists_all_brokers():
+def test_registry_lists_mt5_only():
+    """MT5-only platform: Binance / MEXC brokers are parked (their PUBLIC Binance
+    market-data flow still runs via market_data.py)."""
     brokers = supported_brokers()
+    assert brokers == ["MT5"]
     assert "MT5" in brokers
-    assert "Binance" in brokers
-    assert "MEXC" in brokers  # new universal-connector broker
+    assert "Binance" not in brokers  # parked for now
+    assert "MEXC" not in brokers  # parked for now
 
 
 def test_keyring_namespace_mapping():
     assert keyring_namespace("MT5") == "mt5"
-    assert keyring_namespace("Binance") == "binance"
-    assert keyring_namespace("MEXC") == "mexc"
+    assert keyring_namespace("Binance") is None  # parked
+    assert keyring_namespace("MEXC") is None  # parked
     assert keyring_namespace("cTrader") is None
 
 
 def test_factory_dispatch_returns_right_adapter_types():
-    from app.services.binance_adapter import BinanceAdapter
-    from app.services.mexc_adapter import MEXCAdapter
     from app.services.mt5_adapter import MT5Adapter
 
     assert isinstance(get_broker_adapter("MT5", "12345"), MT5Adapter)
-    assert isinstance(get_broker_adapter("Binance", "key"), BinanceAdapter)
-    assert isinstance(get_broker_adapter("MEXC", "key"), MEXCAdapter)
+    assert get_broker_adapter("Binance", "key") is None  # parked
+    assert get_broker_adapter("MEXC", "key") is None  # parked
     assert get_broker_adapter("cTrader") is None
 
 

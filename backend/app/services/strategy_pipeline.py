@@ -26,7 +26,8 @@ _LOCK = threading.Lock()
 
 # Asset-agnostic default: if no symbol is supplied the strategy is still
 # synthesized fine — the scanner re-reads params per asset at scan time.
-DEFAULT_SYMBOLS = ["EURUSD", "XAUUSD", "BTCUSDT"]
+# FX-first focus (MT5 / Prop Firm): fallbacks are FX majors.
+DEFAULT_SYMBOLS = ["EURUSD", "GBPUSD", "USDJPY"]
 
 
 def _parse_timeframe_hint(markdown: str) -> str | None:

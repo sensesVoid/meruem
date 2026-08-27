@@ -17,16 +17,20 @@ from __future__ import annotations
 from typing import Any
 
 BROKER_MT5 = "MT5"
-BROKER_BINANCE = "Binance"
-BROKER_MEXC = "MEXC"
+# Binance / MEXC are parked for now — the platform is MT5-only (Prop Firm
+# account management, FX focus). Their PUBLIC market-data flow stays live in
+# market_data.py (Binance public klines need no credentials); only the broker
+# adapters are commented out.
+# BROKER_BINANCE = "Binance"
+# BROKER_MEXC = "MEXC"
 
 # Normalised broker names accepted by the connect/test routes and stored on
 # ``Account.broker``. ``keyring_namespace`` is the OS-keyring vault namespace
 # the adapter reads credentials from.
 BROKER_REGISTRY: dict[str, dict[str, Any]] = {
     BROKER_MT5: {"adapter": "app.services.mt5_adapter.MT5Adapter", "keyring_namespace": "mt5"},
-    BROKER_BINANCE: {"adapter": "app.services.binance_adapter.BinanceAdapter", "keyring_namespace": "binance"},
-    BROKER_MEXC: {"adapter": "app.services.mexc_adapter.MEXCAdapter", "keyring_namespace": "mexc"},
+    # BROKER_BINANCE: {"adapter": "app.services.binance_adapter.BinanceAdapter", "keyring_namespace": "binance"},
+    # BROKER_MEXC: {"adapter": "app.services.mexc_adapter.MEXCAdapter", "keyring_namespace": "mexc"},
 }
 
 

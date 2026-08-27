@@ -1,0 +1,12 @@
+# QiMera backend (extension of the Meruem repo).
+# The skeleton reuses the repo-root virtualenv (.venv) — fastapi/uvicorn/requests
+# are already installed by backend/requirements.txt.
+# juliacall drives the Julia compute layer (§6.4 / M2); it needs a Julia runtime
+# on PATH (install via: winget install Julialang.Juliaup).
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+requests==2.32.3
+juliacall>=0.9.35
+deap>=1.4.1      # Parametric GP orchestrator (§6.7 / M3)
+yfinance>=1.0     # on-demand OHLCV source for research ingestion (data_sources)
